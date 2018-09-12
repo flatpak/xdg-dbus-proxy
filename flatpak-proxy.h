@@ -22,7 +22,6 @@
 #define __FLATPAK_PROXY_H__
 
 #include <gio/gio.h>
-#include "libglnx/libglnx.h"
 
 typedef enum {
   FLATPAK_POLICY_NONE,

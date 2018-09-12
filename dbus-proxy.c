@@ -25,13 +25,70 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
-
-#include "libglnx/libglnx.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include "flatpak-proxy.h"
 
 static GList *proxies;
 static int sync_fd = -1;
+
+static GBytes *
+fd_readall_bytes (int               fd,
+                  GError          **error)
+{
+  const guint maxreadlen = 4096;
+  struct stat stbuf;
+  gsize buf_allocated;
+  g_autofree guint8* buf = NULL;
+  gsize buf_size = 0;
+
+  if (TEMP_FAILURE_RETRY (fstat (fd, &stbuf)) != 0)
+    {
+      int errsv = errno;
+      g_set_error_literal (error,
+                           G_IO_ERROR,
+                           g_io_error_from_errno (errsv),
+                           g_strerror (errsv));
+      return NULL;
+    }
+
+  if (S_ISREG (stbuf.st_mode) && stbuf.st_size > 0)
+    buf_allocated = stbuf.st_size;
+  else
+    buf_allocated = 16;
+
+  buf = g_malloc (buf_allocated);
+
+  while (TRUE)
+    {
+      gsize readlen = MIN (buf_allocated - buf_size, maxreadlen);
+      gssize bytes_read;
+
+      do
+        bytes_read = read (fd, buf + buf_size, readlen);
+      while (G_UNLIKELY (bytes_read == -1 && errno == EINTR));
+
+      if (G_UNLIKELY (bytes_read == -1))
+        {
+          int errsv = errno;
+          g_set_error_literal (error,
+                               G_IO_ERROR,
+                               g_io_error_from_errno (errsv),
+                               g_strerror (errsv));
+          return NULL;
+        }
+      if (bytes_read == 0)
+        break;
+
+      buf_size += bytes_read;
+      if (buf_allocated - buf_size < maxreadlen)
+        buf = g_realloc (buf, buf_allocated *= 2);
+    }
+
+  return g_bytes_new_take (g_steal_pointer (&buf), buf_size);
+}
 
 static void
 add_args (GBytes    *bytes,
@@ -102,7 +159,7 @@ parse_generic_args (GPtrArray *args, int *args_i)
           return FALSE;
         }
 
-      data = glnx_fd_readall_bytes (fd, NULL, &error);
+      data = fd_readall_bytes (fd, &error);
 
       if (data == NULL)
         {
