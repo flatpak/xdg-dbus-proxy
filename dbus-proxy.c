@@ -126,7 +126,12 @@ parse_generic_args (GPtrArray *args, int *args_i)
 {
   const char *arg = g_ptr_array_index (args, *args_i);
 
-  if (g_str_has_prefix (arg, "--fd="))
+  if (g_str_has_prefix (arg, "--version"))
+    {
+      g_print ("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
+      exit (0);
+    }
+  else if (g_str_has_prefix (arg, "--fd="))
     {
       const char *fd_s = arg + strlen ("--fd=");
       char *endptr;
