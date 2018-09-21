@@ -158,7 +158,7 @@ parse_generic_args (GPtrArray *args, int *args_i)
   else if (strcmp (arg, "--version") == 0)
     {
       g_print ("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
-      exit (0);
+      exit (EXIT_SUCCESS);
     }
   else if (g_str_has_prefix (arg, "--fd="))
     {
@@ -381,19 +381,19 @@ main (int argc, const char *argv[])
       if (arg[0] == '-')
         {
           if (!parse_generic_args (args, &args_i))
-            return 1;
+            return EXIT_FAILURE;
         }
       else
         {
           if (!start_proxy (args, &args_i))
-            return 1;
+            return EXIT_FAILURE;
         }
     }
 
   if (proxies == NULL)
     {
       g_printerr ("No proxies specified\n");
-      return 1;
+      return EXIT_FAILURE;
     }
 
   if (sync_fd >= 0)
@@ -414,5 +414,5 @@ main (int argc, const char *argv[])
 
   g_main_loop_unref (service_loop);
 
-  return 0;
+  return EXIT_SUCCESS;
 }
