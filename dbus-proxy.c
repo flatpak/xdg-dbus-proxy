@@ -31,8 +31,33 @@
 
 #include "flatpak-proxy.h"
 
+static const char *argv0;
 static GList *proxies;
 static int sync_fd = -1;
+
+static void
+usage (int ecode, FILE *out)
+{
+  fprintf (out, "usage: %s [OPTIONS...] [ADDRESS PATH [OPTIONS...] ...]\n\n", argv0);
+
+  fprintf (out,
+           "Options:\n"
+           "    --help                       Print this help\n"
+           "    --version                    Print version\n"
+           "    --fd=FD                      Stop when FD is closed\n"
+           "    --args=FD                    Read arguments from FD\n\n"
+           "Proxy Options:\n"
+           "    --filter                     Enable filtering\n"
+           "    --log                        Turn on logging\n"
+           "    --sloppy-names               Report name changes for unique names\n"
+           "    --see=NAME                   Set 'see' policy for NAME\n"
+           "    --talk=NAME                  Set 'talk' policy for NAME\n"
+           "    --own=NAME                   Set 'own' policy for NAME\n"
+           "    --call=NAME=RULE             Set RULE for calls on NAME\n"
+           "    --broadcast=NAME=RULE        Set RULE for broadcasts from NAME\n"
+          );
+  exit (ecode);
+}
 
 static GBytes *
 fd_readall_bytes (int               fd,
@@ -126,7 +151,11 @@ parse_generic_args (GPtrArray *args, int *args_i)
 {
   const char *arg = g_ptr_array_index (args, *args_i);
 
-  if (g_str_has_prefix (arg, "--version"))
+  if (strcmp (arg, "--help") == 0)
+    {
+      usage (EXIT_SUCCESS, stdout);
+    }
+  else if (strcmp (arg, "--version") == 0)
     {
       g_print ("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
       exit (0);
@@ -292,7 +321,7 @@ start_proxy (GPtrArray *args, int *args_i)
         }
       else if (g_str_equal (arg, "--sloppy-names"))
         {
-          /* This means we're reporing the name changes for all unique names,
+          /* This means we're reporting the name changes for all unique names,
              which is needed for the a11y bus */
           flatpak_proxy_set_sloppy_names (proxy, TRUE);
           *args_i += 1;
@@ -336,6 +365,11 @@ main (int argc, const char *argv[])
   int i, args_i;
 
   g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func (g_free);
+
+  argv0 = argv[0];
+
+  if (argc == 1)
+    usage (EXIT_FAILURE, stderr);
 
   for (i = 1; i < argc; i++)
     g_ptr_array_add (args, g_strdup ((char *) argv[i]));
