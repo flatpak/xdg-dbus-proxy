@@ -28,6 +28,24 @@ PKG_CHECK_MODULES(GLIB, [glib-2.0 gio-2.0 gio-unix-2.0])
 AC_SUBST(GLIB_CFLAGS)
 AC_SUBST(GLIB_LIBS)
 
+AC_ARG_ENABLE(man,
+              [AS_HELP_STRING([--enable-man],
+                              [generate man pages [default=auto]])],,
+              enable_man=maybe)
+
+AS_IF([test "$enable_man" != no], [
+  AC_PATH_PROG([XSLTPROC], [xsltproc], [])
+  AS_IF([test -z "$XSLTPROC"], [
+    AS_IF([test "$enable_man" = yes], [
+      AC_MSG_ERROR([xsltproc is required for --enable-man])
+    ])
+    enable_man=no
+  ], [
+    enable_man=yes
+  ])
+])
+AM_CONDITIONAL(ENABLE_MAN, test "$enable_man" != no)
+
 AC_CONFIG_FILES([
 Makefile
 ])

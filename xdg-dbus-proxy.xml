@@ -1,0 +1,219 @@
+<?xml version="1.0"?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.3//EN"
+               "http://www.oasis-open.org/docbook/xml/4.3/docbookx.dtd" [
+]>
+<refentry id="bwrap">
+
+<refentryinfo>
+  <title>xdg-dbus-proxy</title>
+  <productname>flatpak</productname>
+  <authorgroup>
+    <author>
+      <contrib>Developer</contrib>
+      <firstname>Alexander</firstname>
+      <surname>Larsson</surname>
+    </author>
+  </authorgroup>
+</refentryinfo>
+
+<refmeta>
+  <refentrytitle>xdg-dbus-proxy</refentrytitle>
+  <manvolnum>1</manvolnum>
+  <refmiscinfo class="manual">User Commands</refmiscinfo>
+</refmeta>
+
+<refnamediv>
+  <refname>xdg-dbus-proxy</refname>
+  <refpurpose>D-Bus proxy</refpurpose>
+</refnamediv>
+
+<refsynopsisdiv>
+<cmdsynopsis>
+<command>xdg-dbus-proxy</command>
+<arg choice="opt" rep="repeat"><replaceable>OPTION</replaceable></arg>
+<arg choice="opt" rep="repeat"><replaceable>ADDRESS</replaceable> <replaceable>PATH</replaceable>
+    <arg choice="opt" rep="repeat"><replaceable>OPTION</replaceable></arg>
+</arg>
+</cmdsynopsis>
+</refsynopsisdiv>
+
+<refsect1><title>Description</title>
+<para>
+  <command>xdg-dbus-proxy</command> is a filtering proxy for D-Bus connections. Its
+  arguments are one or more <replaceable>ADDRESS</replaceable>-<replaceable>PATH</replaceable>
+  pairs specifying the buses to proxy, with options that specify what filtering to apply.
+</para>
+<refsect2><title>Basic Operation</title>
+<para>
+  The proxy listens to the unix domain socket at <replaceable>PATH</replaceable>,
+  and for each client that connects to the socket, it opens up a new connection to
+  the specified D-Bus <replaceable>ADDRESS</replaceable> (typically the session bus)
+  and forwards data between the two. During the authentication phase all data is
+  forwarded as received, and additionally for the first 1 byte zero we also send
+  the proxy credentials to the bus.
+</para>
+<para>
+  Once the connection is authenticated there are two modes, filtered and unfiltered.
+  In the unfiltered mode all messages are sent on as they are received.  In the filtering
+  mode policy is applied to determine which messages to allow, and which to drop.
+</para>
+<para>
+  Filtering is applied only to outgoing signals and method calls and incoming broadcast
+  signals. All replies (errors or method returns) are allowed once for an outstanding
+  method call, and never otherwise.
+</para>
+<para>
+  If a client ever receives a message from another peer on the bus, the senders unique
+  name is made visible, so the client can track caller lifetimes via NameOwnerChanged
+  signals. If a client calls a method on or receives a broadcast signal from a name
+  (even if filtered to some subset of paths or interfaces), that names basic policy
+  is considered to be (at least) TALK, from then on.
+</para>
+</refsect2>
+<refsect2><title>Policy</title>
+<para>
+  The policy for the filtering consists of a mapping from well-known names to a policy
+  that is either SEE, TALK or OWN. The default initial policy is that the the user is only
+  allowed to TALK to the bus itself (org.freedesktop.DBus, or no destination specified),
+  and TALK to its own unique ID. All other clients are invisible.
+</para>
+<para>
+  Here is a description of the policy levels (each level implies the ones before it):
+</para>
+<variablelist>
+  <varlistentry><term>SEE</term>
+    <listitem>
+      <para>The name/ID is visible in the ListNames reply</para>
+      <para>The name/ID is visible in the ListActivatableNames reply</para>
+      <para>You can call GetNameOwner on the name</para>
+      <para>You can call NameHasOwner on the name</para>
+      <para>You see NameOwnerChanged signals on the name</para>
+      <para>You see NameOwnerChanged signals on the ID when the client disconnects</para>
+      <para>You can call the GetXXX methods on the name/ID to get e.g. the peer pid</para>
+      <para>You get AccessDenied rather than NameHasNoOwner when sending messages to the name/ID</para>
+    </listitem>
+  </varlistentry>
+  <varlistentry><term>TALK</term>
+    <listitem>
+      <para>You can send any method calls and signals to the name/ID</para>
+      <para>You will receive broadcast signals from the name/ID (if you have a match rule for them)</para>
+      <para>You can call StartServiceByName on the name</para>
+    </listitem>
+  </varlistentry>
+  <varlistentry><term>OWN</term>
+    <listitem>
+      <para>You are allowed to call RequestName/ReleaseName/ListQueuedOwners on the name</para>
+    </listitem>
+  </varlistentry>
+</variablelist>
+<para>
+  Policy is specified with the <option>--see</option>, <option>--talk</option> and
+  <option>--own</option> options. The well-known names in these options can have a
+  '.*' suffix. A name of "org.foo.*" matches "org.foo", org.foo.bar", and
+  "org.foo.bar.gazonk", but not "org.foobar".
+</para>
+<para>
+  Polices are specified for well-known names, but they also affect the owner of that
+  name, so that the policy for a unique ID is the union of the polices for all the names
+  it owns. For technical reasons, the policy for a unique name is "sticky", in that the
+  highest policy granted by a once-owned name is kept, even when the client releases that
+  name. This is impossible to avoid in a race-free way in a proxy. But it is rarely a
+  problem in practice, as few clients release names and stay on the bus.
+</para>
+<para>
+  In addition to the basic SEE/TALK/OWN policy, it is possible to specify more
+  complicated rules about what method calls can be made on and what broadcast
+  signals can be received from well-known names. A rule can restrict the allowed
+  calls/signals to a specific object path or a subtree of object paths, and it
+  can restrict the allowed interface down to an individual method or signal name.
+</para>
+<para>
+  Rules are specified with the <option>--call</option> and <option>--broadcast</option>
+  options. The <replaceable>RULE</replaceable> in these options determines what interfaces,
+  methods and object paths are allowed. It must be of the form
+  [<replaceable>METHOD</replaceable>][@<replaceable>PATH</replaceable>], where
+  <replaceable>METHOD</replaceable> can be either '*' or a D-Bus interface, possible
+  with a '.*' suffix, or a fully-qualified method name, and <replaceable>PATH</replaceable>
+  is a D-Bus object path, possible with a '/*' suffix.
+</para>
+</refsect2>
+</refsect1>
+
+<refsect1><title>Options</title>
+  <para>
+    When options are used multiple times, the last option wins, unless otherwise
+    specified.
+  </para>
+  <para>General options:</para>
+  <variablelist>
+    <varlistentry>
+      <term><option>--help</option></term>
+      <listitem><para>Print help and exit</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--version</option></term>
+      <listitem><para>Print version</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--fd=<arg choice="plain">FD</arg></option></term>
+      <listitem><para>
+        Write to FD when the proxies are ready, and stop when it is closed.
+      </para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--args=<arg choice="plain">FD</arg></option></term>
+      <listitem><para>
+        Parse nul-separated arguments from the given file descriptor.
+        This option can be used multiple times to parse options from
+        multiple sources.
+      </para></listitem>
+    </varlistentry>
+  </variablelist>
+  <para>Proxy Options:</para>
+  <para>
+    These options can only be used after an ADDRESS and apply to the proxy
+    for that address.
+  </para>
+  <variablelist>
+    <varlistentry>
+      <term><option>--filter</option></term>
+      <listitem><para>Enable filtering</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--log</option></term>
+      <listitem><para>Turn on logging</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--sloppy-names</option></term>
+      <listitem><para>Make all unique names visible.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--see=<replaceable>NAME</replaceable></option></term>
+      <listitem><para>Set the SEE policy for the given name.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--talk=<replaceable>NAME</replaceable></option></term>
+      <listitem><para>Set the TALK policy for the given name.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--own=<replaceable>NAME</replaceable></option></term>
+      <listitem><para>Set the OWN policy for the given name.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--call=<replaceable>NAME</replaceable>=<replaceable>RULE</replaceable></option></term>
+      <listitem><para>Set a rule for calls on the given name.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--broadcast=<replaceable>NAME</replaceable>=<replaceable>RULE</replaceable></option></term>
+      <listitem><para>Set a rule for broadcast signals from the given name.</para></listitem>
+    </varlistentry>
+  </variablelist>
+</refsect1>
+
+<refsect1><title>Examples</title>
+<para>
+  <command>$ xdg-dbus-proxy --fd=26 unix:path=/run/usr/1000/bus /run/usr/1000/.dbus-proxy/session-bus-proxy --filter --own=org.gnome.ghex.* --talk=ca.desrt.dconf --call=org.freedesktop.portal.*=* --broadcast=org.freedesktop.portal.*=@/org/freedesktop/portal/*</command>
+</para>
+</refsect1>
+
+</refentry>
