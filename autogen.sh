@@ -18,6 +18,7 @@ fi
 # regenerated from their corresponding *.in files by ./configure anyway.
 touch INSTALL
 
+mkdir -p build-aux
 mkdir -p m4
 
 autoreconf --force --install --verbose || exit $?

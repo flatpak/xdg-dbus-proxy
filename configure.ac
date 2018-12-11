@@ -1,6 +1,7 @@
 AC_PREREQ([2.63])
 
 AC_INIT([xdg-dbus-proxy],[0.1.0])
+AC_CONFIG_AUX_DIR([build-aux])
 
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE

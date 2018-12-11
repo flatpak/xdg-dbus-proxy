@@ -4,6 +4,7 @@ INSTALL
 Makefile
 Makefile.in
 autom4te.cache/
+/build-aux/
 compile
 config.h
 config.h.in
