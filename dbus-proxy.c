@@ -35,6 +35,7 @@ static const char *argv0;
 static GList *proxies;
 static int sync_fd = -1;
 
+static void usage (int ecode, FILE *out) G_GNUC_NORETURN;
 static void
 usage (int ecode, FILE *out)
 {
