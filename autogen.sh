@@ -18,6 +18,8 @@ fi
 # regenerated from their corresponding *.in files by ./configure anyway.
 touch INSTALL
 
+mkdir -p m4
+
 autoreconf --force --install --verbose || exit $?
 
 cd "$olddir"
