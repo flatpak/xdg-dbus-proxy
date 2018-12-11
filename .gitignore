@@ -1,8 +1,8 @@
-.deps
 *.o
+.deps
+.dirstamp
 /INSTALL
-Makefile
-Makefile.in
+/aclocal.m4
 /autom4te.cache/
 /build-aux/
 /compile
@@ -16,5 +16,5 @@ Makefile.in
 /missing
 /stamp-h1
 /xdg-dbus-proxy
-/aclocal.m4
-.dirstamp
+Makefile
+Makefile.in
