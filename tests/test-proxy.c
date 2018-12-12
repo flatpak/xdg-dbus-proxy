@@ -27,6 +27,8 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 
+#include "backport-autoptr.h"
+
 #define DBUS_SERVICE_DBUS "org.freedesktop.DBus"
 #define DBUS_PATH_DBUS "/org/freedesktop/DBus"
 #define DBUS_INTERFACE_DBUS "org.freedesktop.DBus"
