@@ -68,7 +68,6 @@ setup (Fixture *f,
                                                 "--session",
                                                 "--print-address=1",
                                                 "--nofork",
-                                                "--nosyslog",
                                                 NULL);
   g_assert_no_error (error);
   g_assert_nonnull (f->dbus_daemon);
