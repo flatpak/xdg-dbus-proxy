@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <glib.h>
 #include <glib-unix.h>
@@ -76,6 +77,9 @@ setup (Fixture *f,
 
   address_pipe = g_subprocess_get_stdout_pipe (f->dbus_daemon);
 
+  /* Crash if it takes too long to get the address */
+  alarm (30);
+
   while (strchr (address_buffer, '\n') == NULL)
     {
       if (strlen (address_buffer) >= sizeof (address_buffer) - 1)
@@ -89,6 +93,9 @@ setup (Fixture *f,
                            NULL, &error);
       g_assert_no_error (error);
     }
+
+  /* Disable alarm */
+  alarm (0);
 
   newline = strchr (address_buffer, '\n');
   g_assert_nonnull (newline);
@@ -128,6 +135,8 @@ test_basics (Fixture *f,
   ssize_t bytes_read;
   gsize i;
   gboolean found;
+
+  alarm (30);
 
   g_unix_open_pipe (sync_pipe, FD_CLOEXEC, &error);
   g_assert_no_error (error);
@@ -241,6 +250,7 @@ teardown (Fixture *f,
   g_clear_object (&f->proxy);
   g_free (f->dbus_address);
   g_free (f->proxy_address);
+  alarm (0);
 }
 
 int
