@@ -1,6 +1,10 @@
 AC_PREREQ([2.63])
 
 AC_INIT([xdg-dbus-proxy],[0.1.0])
+AC_CONFIG_AUX_DIR([build-aux])
+
+m4_pattern_forbid([^AX_],
+  [Unexpanded AX_ macro found. Please install GNU autoconf-archive])
 
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
@@ -24,9 +28,16 @@ if test "x$GCC" = "xyes"; then
   esac
 fi
 
-PKG_CHECK_MODULES(GLIB, [glib-2.0 gio-2.0 gio-unix-2.0])
+PKG_CHECK_MODULES(GLIB, [glib-2.0 >= 2.40 gio-2.0 gio-unix-2.0])
 AC_SUBST(GLIB_CFLAGS)
 AC_SUBST(GLIB_LIBS)
+
+AC_PROG_AWK
+AC_REQUIRE_AUX_FILE([tap-driver.sh])
+GLIB_TESTS
+
+# Test for code-coverage tools if --enable-code-coverage
+AX_CODE_COVERAGE
 
 AC_ARG_ENABLE(man,
               [AS_HELP_STRING([--enable-man],
