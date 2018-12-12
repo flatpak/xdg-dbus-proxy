@@ -20,11 +20,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <string.h>
 
 #include <glib.h>
 #include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
+
+#include "backport-autoptr.h"
 
 #define DBUS_SERVICE_DBUS "org.freedesktop.DBus"
 #define DBUS_PATH_DBUS "/org/freedesktop/DBus"
@@ -67,7 +70,6 @@ setup (Fixture *f,
                                                 "--session",
                                                 "--print-address=1",
                                                 "--nofork",
-                                                "--nosyslog",
                                                 NULL);
   g_assert_no_error (error);
   g_assert_nonnull (f->dbus_daemon);
