@@ -26,4 +26,4 @@ EXTRA_DIST += build-aux/glib-tap.mk
 EXTRA_DIST += build-aux/tap-test
 
 # Add rules for code-coverage testing, as defined by AX_CODE_COVERAGE
-@CODE_COVERAGE_RULES@
+include $(top_srcdir)/aminclude_static.am

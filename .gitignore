@@ -6,6 +6,7 @@
 .dirstamp
 /INSTALL
 /aclocal.m4
+/aminclude_static.am
 /autom4te.cache/
 /build-aux/*
 /compile
@@ -17,16 +18,26 @@
 /configure
 /depcomp
 /install-sh
-/m4/
+/m4/*
 /missing
 /stamp-h1
 /test-proxy
 /test-suite.log
 /xdg-dbus-proxy
 /xdg-dbus-proxy-*.tar.xz
+/xdg-dbus-proxy-*-coverage.info
+/xdg-dbus-proxy-*-coverage.info.tmp
+/xdg-dbus-proxy-*-coverage/
 Makefile
 Makefile.in
 
 !/build-aux/glib-tap.mk
 !/build-aux/tap-test
+!/m4/ax_ac_append_to_file.m4
+!/m4/ax_ac_print_to_file.m4
+!/m4/ax_add_am_macro_static.m4
+!/m4/ax_am_macros_static.m4
+!/m4/ax_code_coverage.m4
+!/m4/ax_file_escapes.m4
 !/m4/glibtests.m4
+
