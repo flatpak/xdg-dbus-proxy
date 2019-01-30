@@ -1,5 +1,8 @@
 include $(top_srcdir)/build-aux/glib-tap.mk
 
+AM_CPPFLAGS = \
+	$(CODE_COVERAGE_CPPFLAGS) \
+	$(NULL)
 AM_CFLAGS = \
 	$(GLIB_CFLAGS) \
 	$(CODE_COVERAGE_CFLAGS) \
