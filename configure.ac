@@ -3,8 +3,8 @@ AC_PREREQ([2.63])
 AC_INIT([xdg-dbus-proxy],[0.1.1])
 AC_CONFIG_AUX_DIR([build-aux])
 
-m4_pattern_forbid([^AX_],
-  [Unexpanded AX_ macro found. Please install GNU autoconf-archive])
+m4_pattern_forbid([^AX_CODE_COVERAGE$],
+  [Unexpanded AX_CODE_COVERAGE macro found. Please install GNU autoconf-archive])
 
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
