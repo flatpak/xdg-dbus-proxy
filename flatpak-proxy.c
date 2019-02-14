@@ -2137,7 +2137,6 @@ got_buffer_from_client (FlatpakProxyClient *client, ProxySide *side, Buffer *buf
   if (client->authenticated && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
-      ;
       BusHandler handler;
 
       /* Filter and rewrite outgoing messages as needed */
@@ -2306,7 +2305,6 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
   if (client->authenticated && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
-      ;
       GDBusMessage *rewritten;
       FlatpakPolicy policy;
       ExpectedReplyType expected_reply;
