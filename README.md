@@ -4,7 +4,7 @@ xdg-dbus-proxy is a filtering proxy for D-Bus connections. It was originally par
 
 **Synopsis**
 
-xdg-dbus-proxy [OPTION...] [ADDRESS PATH [OPTION...]...]
+`xdg-dbus-proxy [OPTION...] [ADDRESS PATH [OPTION...]...]`
 
 **Description**
 
@@ -61,45 +61,44 @@ When options are used multiple times, the last option wins, unless otherwise spe
 
 General options:
 
---help
-Print help and exit
+       --help
+           Print help and exit
 
---version
-Print version
+       --version
+           Print version
 
---fd=FD
-Write to FD when the proxies are ready, and stop when it is closed.
+       --fd=FD
+           Write to FD when the proxies are ready, and stop when it is closed.
 
---args=FD
-Parse nul-separated arguments from the given file descriptor. This option can be used multiple times to parse options from multiple sources.
+       --args=FD
+           Parse nul-separated arguments from the given file descriptor. This option can be used multiple times to parse 
+           options from multiple sources.
 
-Proxy Options:
+Proxy Options: These options can only be used after an ADDRESS and apply to the proxy for that address.
 
-These options can only be used after an ADDRESS and apply to the proxy for that address.
+       --filter
+           Enable filtering
 
---filter
-Enable filtering
+       --log
+           Turn on logging
 
---log
-Turn on logging
+       --sloppy-names
+           Make all unique names visible.
 
---sloppy-names
-Make all unique names visible.
+       --see=NAME
+           Set the SEE policy for the given name.
 
---see=NAME
-Set the SEE policy for the given name.
+       --talk=NAME
+           Set the TALK policy for the given name.
 
---talk=NAME
-Set the TALK policy for the given name.
+       --own=NAME
+           Set the OWN policy for the given name.
 
---own=NAME
-Set the OWN policy for the given name.
+       --call=NAME=RULE
+           Set a rule for calls on the given name.
 
---call=NAME=RULE
-Set a rule for calls on the given name.
-
---broadcast=NAME=RULE
-Set a rule for broadcast signals from the given name.
+       --broadcast=NAME=RULE
+           Set a rule for broadcast signals from the given name.
 
 **Examples**
 
