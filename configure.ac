@@ -1,6 +1,6 @@
 AC_PREREQ([2.63])
 
-AC_INIT([xdg-dbus-proxy],[0.1.1])
+AC_INIT([xdg-dbus-proxy],[0.1.2])
 AC_CONFIG_AUX_DIR([build-aux])
 
 m4_pattern_forbid([^AX_CODE_COVERAGE$],
