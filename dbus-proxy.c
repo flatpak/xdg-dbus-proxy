@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <locale.h>
 
 #include "flatpak-proxy.h"
 
@@ -361,10 +362,13 @@ sync_closed_cb (GIOChannel  *source,
 int
 main (int argc, const char *argv[])
 {
+  g_autoptr(GPtrArray) args = NULL;
   GMainLoop *service_loop;
   int i, args_i;
 
-  g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func (g_free);
+  setlocale (LC_ALL, "");
+
+  args = g_ptr_array_new_with_free_func (g_free);
 
   argv0 = argv[0];
 
