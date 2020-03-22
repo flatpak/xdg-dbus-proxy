@@ -45,12 +45,16 @@
 </para>
 <refsect2><title>Basic Operation</title>
 <para>
-  The proxy listens to the unix domain socket at <replaceable>PATH</replaceable>,
+  The proxy listens to the unix domain socket at <replaceable>PATH</replaceable> (can look like /tmp/proxy.socket),
   and for each client that connects to the socket, it opens up a new connection to
-  the specified D-Bus <replaceable>ADDRESS</replaceable> (typically the session bus)
-  and forwards data between the two. During the authentication phase all data is
+  the specified D-Bus <replaceable>ADDRESS</replaceable> (typically the session bus, 
+  can look like unix:path=/var/run/1000/dbus.socket)
+  and forwards data between the two. During the authentication phase most data is
   forwarded as received, and additionally for the first 1 byte zero we also send
-  the proxy credentials to the bus.
+  the proxy credentials to the bus. Proxy always rewrites client's user id 
+  in <term>AUTH EXTERNAL </term> command to proxy's effective user id. Without this
+  DBus server would reject connection coming from one user id, but trying to 
+  authenticate as another user id.
 </para>
 <para>
   Once the connection is authenticated there are two modes, filtered and unfiltered.
@@ -206,6 +210,10 @@
     <varlistentry>
       <term><option>--broadcast=<replaceable>NAME</replaceable>=<replaceable>RULE</replaceable></option></term>
       <listitem><para>Set a rule for broadcast signals from the given name.</para></listitem>
+    </varlistentry>
+    <varlistentry>
+      <term><option>--accept-uids=<replaceable>UID1,UID2,...</replaceable></option></term>
+      <listitem><para>Accept only connections made by processes with given effective user ids.</para></listitem>
     </varlistentry>
   </variablelist>
 </refsect1>
