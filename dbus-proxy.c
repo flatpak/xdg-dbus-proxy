@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <locale.h>
+#include <ctype.h>
 
 #include "flatpak-proxy.h"
 // Taken from glibc unistd.h
@@ -49,7 +50,7 @@ static void usage (int ecode, FILE *out) G_GNUC_NORETURN;
 static void
 usage (int ecode, FILE *out)
 {
-  fprintf (out, "usage: %s [OPTIONS...] [ADDRESS PATH [OPTIONS...] ...]\n\n", argv0);
+  fprintf (out, "usage: %s [OPTIONS...] [BUS_ADDRESS LISTEN_SOCKET_PATH [OPTIONS...] ...]\n\n", argv0);
 
   fprintf (out,
            "Options:\n"
@@ -66,6 +67,8 @@ usage (int ecode, FILE *out)
            "    --own=NAME                   Set 'own' policy for NAME\n"
            "    --call=NAME=RULE             Set RULE for calls on NAME\n"
            "    --broadcast=NAME=RULE        Set RULE for broadcasts from NAME\n"
+           "    --accept-uids=UID1,UID2,...  Accept connections made only by processes with these "
+           "user ids\n"
           );
   exit (ecode);
 }
@@ -225,6 +228,66 @@ parse_generic_args (GPtrArray *args, int *args_i)
     }
 }
 
+#define PIL_ERROR_LENGTH 200
+static char pil_error[PIL_ERROR_LENGTH] = "\0";
+
+/**
+ * Parses a comma-separated list of non-negative integers from 
+ * uids_string (e.g. "1,2,3") info uids array. If anything goes wrong, 
+ * writes an error message into parse_error, otherwise writes NULL to it.
+ */
+static void
+parse_int_list (const gchar *uids_string, GArray *uids, char **parse_error)
+{
+  *parse_error = NULL;
+  const gchar *ptr = uids_string;
+  gchar *endptr = NULL;
+
+  do {
+    gint64 number = g_ascii_strtoll(ptr, &endptr, 10);
+
+    if (endptr == ptr) {
+      snprintf(pil_error, PIL_ERROR_LENGTH, "expected a digit, but got character '%c' instead", ptr[0]);
+      *parse_error = pil_error;
+      return;
+    }
+
+    if (number < 0) {
+      snprintf(pil_error, PIL_ERROR_LENGTH, "numbers must be non-negative");
+      *parse_error = pil_error;
+      return;
+    }
+
+    if (number <= LONG_MIN || number >= LONG_MAX) {
+      snprintf(pil_error, PIL_ERROR_LENGTH, "number is too large");
+      *parse_error = pil_error;
+      return;
+    }
+
+    ptr = endptr;
+    gint inserted_number = (gint)number;
+    g_array_append_val(uids, inserted_number);
+
+    while (ptr[0] != '\0') {
+      char ch = ptr[0];
+      ptr++;
+
+      if (ch == ',') {
+        break;
+      }
+
+      if (isspace(ch)) {
+        continue;
+      }
+
+      snprintf(pil_error, PIL_ERROR_LENGTH, "expected space, end of line or comma, but got '%c'", ch);
+      *parse_error = pil_error;
+      return;
+    }
+
+  } while (ptr[0] != '\0');
+}
+
 static gboolean
 start_proxy (GPtrArray *args, int *args_i)
 {
@@ -318,6 +381,21 @@ start_proxy (GPtrArray *args, int *args_i)
           else
             flatpak_proxy_add_broadcast_rule (proxy, name, wildcard, rule);
 
+          *args_i += 1;
+        }
+      else if (g_str_has_prefix (arg, "--accept-uids="))
+        {
+          g_autofree char *uids_string = g_strdup (strchr (arg, '=') + 1);
+          g_autoptr(GArray) uids = g_array_new(FALSE, FALSE, sizeof(gint));
+          char *parse_error = NULL;
+          parse_int_list(uids_string, uids, &parse_error);
+          if (parse_error) {
+            g_printerr ("error while parsing list of integers in argument '%s': %s\n", 
+              arg, parse_error);
+            return FALSE;
+          }
+
+          flatpak_proxy_set_accepted_uids(proxy, uids);
           *args_i += 1;
         }
       else if (g_str_equal (arg, "--log"))

@@ -23,19 +23,39 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <sys/types.h>
+
 #include "flatpak-proxy.h"
 
 #include <gio/gunixsocketaddress.h>
 #include <gio/gunixconnection.h>
 #include <gio/gunixfdmessage.h>
+#include <gio/gunixcredentialsmessage.h>
+#include <gio/gio.h>
+#include <sys/socket.h>
 
 /**
  * The proxy listens to a unix domain socket, and for each new
  * connection it opens up a new connection to a specified dbus bus
  * address (typically the session bus) and forwards data between the
- * two. During the authentication phase all data is forwarded as
+ * two. 
+ *
+ * For every connection, there are 3 stages: 
+ *
+ * - receiving first zero byte
+ * - auth stage (exchanging \r\n-terminated ASCII strings)
+ * - post auth stage (exchanging DBus wire format messages)
+ * 
+ * During the authentication phase most commands are forwarded as
  * received, and additionally for the first 1 byte zero we also send
- * the proxy credentials to the bus.
+ * the proxy credentials to the bus. The only thing that the proxy may 
+ * change is to replace client's user id in command 
+ * 
+ * AUTH EXTERNAL <hex-user-id>
+ * 
+ * with proxy's user id (otherwise when client's and proxy's user ids 
+ * are different, the server might reject a connection that comes from 
+ * proxy but tries to authenticate as a different user).
  *
  * Once the connection is authenticated there are two modes, filtered
  * and unfiltered. In the unfiltered mode we just send all messages on
@@ -182,11 +202,10 @@
 
 typedef struct FlatpakProxyClient FlatpakProxyClient;
 
-#define FIND_AUTH_END_CONTINUE -1
-#define FIND_AUTH_END_ABORT -2
-
-#define AUTH_LINE_SENTINEL "\r\n"
-#define AUTH_BEGIN "BEGIN"
+// Minimal size required to determine full size of a DBus message
+// 12 bytes for header + 4 bytes for size of array of header fields
+// should be enough
+#define MIN_DBUS_HEADER_SIZE 16
 
 typedef enum {
   EXPECTED_REPLY_NONE,
@@ -265,9 +284,7 @@ typedef struct
   GSource            *in_source;
   GSource            *out_source;
 
-  GBytes             *extra_input_data;
-  Buffer             *current_read_buffer;
-  Buffer              header_buffer;
+  Buffer             *read_buffer; 
 
   GList              *buffers; /* to be sent */
   GList              *control_messages;
@@ -317,6 +334,15 @@ struct FlatpakProxy
   gboolean       sloppy_names;
 
   GHashTable    *filters;
+
+  /* 
+   * When check_client_uid is true, this array will contain a list
+   * of user ids that are allowed to connect to the proxy.
+   *
+   * When check_client_uid is false, this array should not be used.
+   */
+  GArray        *accept_uids;
+  gboolean      check_client_uid;
 };
 
 typedef struct
@@ -331,11 +357,6 @@ enum {
   PROP_DBUS_ADDRESS,
   PROP_SOCKET_PATH
 };
-
-#define FLATPAK_TYPE_PROXY flatpak_proxy_get_type ()
-#define FLATPAK_PROXY(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), FLATPAK_TYPE_PROXY, FlatpakProxy))
-#define FLATPAK_IS_PROXY(obj) (G_TYPE_CHECK_INSTANCE_TYPE ((obj), FLATPAK_TYPE_PROXY))
-
 
 #define FLATPAK_TYPE_PROXY_CLIENT flatpak_proxy_client_get_type ()
 #define FLATPAK_PROXY_CLIENT(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), FLATPAK_TYPE_PROXY_CLIENT, FlatpakProxyClient))
@@ -376,14 +397,24 @@ buffer_ref (Buffer *buffer)
   return buffer;
 }
 
+static gboolean
+buffer_is_full (Buffer *buffer)
+{
+  return buffer->pos >= buffer->size;
+}
+
 static void
 free_side (ProxySide *side)
 {
   g_clear_object (&side->connection);
-  g_clear_pointer (&side->extra_input_data, g_bytes_unref);
 
   g_list_free_full (side->buffers, (GDestroyNotify) buffer_unref);
   g_list_free_full (side->control_messages, (GDestroyNotify) g_object_unref);
+
+  if (side->read_buffer) {
+    buffer_unref (side->read_buffer);
+    side->read_buffer = NULL;
+  }
 
   if (side->in_source)
     g_source_destroy (side->in_source);
@@ -426,9 +457,6 @@ init_side (FlatpakProxyClient *client, ProxySide *side)
 {
   side->got_first_byte = (side == &client->bus_side);
   side->client = client;
-  side->header_buffer.size = 16;
-  side->header_buffer.pos = 0;
-  side->current_read_buffer = &side->header_buffer;
   side->expected_replies = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
@@ -480,6 +508,15 @@ flatpak_proxy_set_log_messages (FlatpakProxy *proxy,
                                 gboolean      log)
 {
   proxy->log_messages = log;
+}
+
+void
+flatpak_proxy_set_accepted_uids (FlatpakProxy *proxy,
+                                 GArray* uids)
+{
+  g_array_set_size(proxy->accept_uids, 0);
+  g_array_insert_vals(proxy->accept_uids, 0, uids->data, uids->len);
+  proxy->check_client_uid = TRUE;
 }
 
 static void
@@ -691,6 +728,8 @@ flatpak_proxy_finalize (GObject *object)
   g_free (proxy->socket_path);
   g_free (proxy->dbus_address);
 
+  g_array_free(proxy->accept_uids, TRUE);
+
   G_OBJECT_CLASS (flatpak_proxy_parent_class)->finalize (object);
 }
 
@@ -705,10 +744,16 @@ flatpak_proxy_set_property (GObject      *object,
   switch (prop_id)
     {
     case PROP_DBUS_ADDRESS:
+      if (proxy->dbus_address) {
+        g_free(proxy->dbus_address);
+      }
       proxy->dbus_address = g_value_dup_string (value);
       break;
 
     case PROP_SOCKET_PATH:
+      if (proxy->socket_path) {
+        g_free(proxy->socket_path);
+      }
       proxy->socket_path = g_value_dup_string (value);
       break;
 
@@ -765,6 +810,45 @@ buffer_new (gsize size, Buffer *old)
   return buffer;
 }
 
+/**
+ * Creates a new buffer and copies everything after msg_size into 
+ * it. Truncates original buffer to msg_size.
+ *
+ * If move_control_messages is TRUE then moves all control messages
+ * to new buffer.
+ */
+static Buffer *
+buffer_split_tail (
+  gssize size_hint, 
+  Buffer *original_buffer, 
+  gssize msg_size, 
+  gboolean move_control_messages
+) 
+{  
+  gssize extra_info_size = original_buffer->pos - msg_size;
+  gssize new_buf_size = MAX (size_hint, extra_info_size);
+  Buffer *new_buffer = buffer_new (new_buf_size, NULL);
+
+  g_assert (msg_size <= original_buffer->size);
+  g_assert (msg_size <= original_buffer->pos);
+
+  if (extra_info_size > 0)
+    {
+      memcpy (new_buffer->data, &original_buffer->data[msg_size], extra_info_size);
+      new_buffer->pos = extra_info_size;
+
+      if (move_control_messages) 
+        {
+          new_buffer->control_messages = original_buffer->control_messages;
+          original_buffer->control_messages = NULL;     
+        }
+    }
+
+  original_buffer->size = msg_size;
+
+  return new_buffer;
+}
+
 static ProxySide *
 get_other_side (ProxySide *side)
 {
@@ -812,6 +896,9 @@ side_closed (ProxySide *side)
     }
 }
 
+/**
+ * Returns FALSE if there was an error or no bytes were read.
+ */
 static gboolean
 buffer_read (ProxySide *side,
              Buffer    *buffer,
@@ -823,60 +910,43 @@ buffer_read (ProxySide *side,
   GSocketControlMessage **messages;
   int num_messages, i;
 
-  if (side->extra_input_data)
+  int flags = 0;
+  v.buffer = &buffer->data[buffer->pos];
+  v.size = buffer->size - buffer->pos;
+
+  res = g_socket_receive_message (socket, NULL, &v, 1,
+                                  &messages,
+                                  &num_messages,
+                                  &flags, NULL, &error);
+  if (res < 0 && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
     {
-      gsize extra_size;
-      const guchar *extra_bytes = g_bytes_get_data (side->extra_input_data, &extra_size);
-
-      res = MIN (extra_size, buffer->size - buffer->pos);
-      memcpy (&buffer->data[buffer->pos], extra_bytes, res);
-
-      if (res < extra_size)
-        {
-          side->extra_input_data =
-            g_bytes_new_with_free_func (extra_bytes + res,
-                                        extra_size - res,
-                                        (GDestroyNotify) g_bytes_unref,
-                                        side->extra_input_data);
-        }
-      else
-        {
-          g_clear_pointer (&side->extra_input_data, g_bytes_unref);
-        }
+      g_error_free (error);
+      return FALSE;
     }
-  else
-    {
-      int flags = 0;
-      v.buffer = &buffer->data[buffer->pos];
-      v.size = buffer->size - buffer->pos;
 
-      res = g_socket_receive_message (socket, NULL, &v, 1,
-                                      &messages,
-                                      &num_messages,
-                                      &flags, NULL, &error);
-      if (res < 0 && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+  if (res <= 0)
+    {
+      if (res != 0)
         {
+          g_debug ("Error reading from socket: %s", error->message);
           g_error_free (error);
-          return FALSE;
         }
-
-      if (res <= 0)
+      else 
         {
-          if (res != 0)
+          if (side->client->proxy->log_messages) 
             {
-              g_debug ("Error reading from socket: %s", error->message);
-              g_error_free (error);
+              g_print ("Client disconnected\n");
             }
-
-          side_closed (side);
-          return FALSE;
         }
 
-      for (i = 0; i < num_messages; i++)
-        buffer->control_messages = g_list_append (buffer->control_messages, messages[i]);
-
-      g_free (messages);
+      side_closed (side);
+      return FALSE;
     }
+
+  for (i = 0; i < num_messages; i++)
+    buffer->control_messages = g_list_append (buffer->control_messages, messages[i]);
+
+  g_free (messages);
 
   buffer->pos += res;
   return TRUE;
@@ -2503,90 +2573,601 @@ got_buffer_from_side (ProxySide *side, Buffer *buffer)
 
 #define _DBUS_ISASCII(c) ((c) != '\0' && (((c) & ~0x7f) == 0))
 
-static gboolean
-auth_line_is_valid (guint8 *line, guint8 *line_end)
+static gboolean 
+is_first_byte_stage (ProxySide *side)
 {
-  guint8 *p;
+  return !side->client->authenticated && !side->got_first_byte;
+}
 
-  for (p = line; p < line_end; p++)
+static gboolean 
+is_auth_stage (ProxySide *side)
+{
+  return !side->client->authenticated && side->got_first_byte;
+}
+
+static gboolean 
+is_post_auth_stage (ProxySide *side)
+{
+  return side->client->authenticated;    
+}
+
+static const char* 
+get_stage_name (ProxySide *side)
+{
+  if (is_first_byte_stage (side))
     {
-      if (!_DBUS_ISASCII (*p))
-        return FALSE;
+      return "first byte";
+    }
+  else if (is_auth_stage (side))
+    {
+      return "auth";
+    }
+  else 
+    {
+      return "post auth";
+    }
+}
 
-      /* Technically, the dbus spec allows all ASCII characters, but for robustness we also
-         fail if we see any control characters. Such low values will appear in  potential attacks,
-         but will never happen in real sasl (where all binary data is hex encoded). */
-      if (*p < ' ')
+/**
+ * Returns expected message size at given stage so that there 
+ * will be no need to reallocate buffers or copy extra data.
+ */
+static gssize 
+get_default_buffer_size (ProxySide *side)
+  {
+    if (is_first_byte_stage (side))     
+      {
+        return 1;     
+      }
+    else if (is_auth_stage (side))
+      {
+        return 64;     
+      }
+    else
+      {
+        // We have to load header first and only then 
+        // we can determine full message size
+        return MIN_DBUS_HEADER_SIZE;     
+      }
+  }
+
+static void 
+print_as_ascii (guchar* buffer, gssize size)
+{
+  for (gint i = 0; i < size; i++)
+    {
+      guchar ch = buffer[i];
+      if (g_ascii_isgraph (ch) || ch == ' ')
+        {
+          g_print ("%c", ch);
+        }
+      else if (ch == '\r')
+        {
+          g_print ("\\r");
+        }
+      else if (ch == '\n')
+        {
+          g_print ("\\n");
+        }
+      else 
+        {
+          g_print ("\\x%02x", (gint)ch);
+        }
+    }
+}
+
+/**
+ * Checks whether the message is read completely. For DBus messages
+ * also checks whether message header (that allows to determine full size)
+ * is read completely.
+ *
+ * If the message is complete, returns its size in message_size.
+ *
+ * If only header is complete, returns header_complete = TRUE and 
+ * message_size.
+ *
+ * If parse_error is non-empty then DBus message header cannot be 
+ * parsed and connection should be aborted.
+ *
+ * Returns message_too_long if a message without exact size took too much 
+ * space.
+ */
+static gboolean
+check_if_message_is_complete (
+  ProxySide     *side,
+  Buffer        *buffer,
+  gboolean      *header_complete,
+  gboolean      *message_too_long,
+  GError        **parse_error,
+  gssize        *message_size 
+)
+  {
+    *header_complete = FALSE;
+    *message_too_long = FALSE;
+    *parse_error = NULL;
+    *message_size = 0;
+
+    if (is_first_byte_stage (side))
+      {
+        if (buffer->pos >= 1)     
+          {
+            *message_size = 1;
+            return TRUE;
+          }
+
         return FALSE;
+      }
+
+    if (is_auth_stage (side))
+      {
+        // Search for \r\n within limit of 16K
+        gssize auth_limit = 16384;
+        gssize max_len = MIN (auth_limit, MIN (buffer->size - 1, buffer->pos));
+        for (int i = 1; i <= max_len; i++)
+        {
+          if (buffer->data[i] == '\n' &&
+              buffer->data[i - 1] == '\r')
+            {
+              *message_size = i + 1;
+              return TRUE;
+            }
+        }
+
+        if (max_len == auth_limit)
+          {
+            *message_too_long = TRUE;     
+          }
+
+        return FALSE;
+      }
+
+    if (buffer->pos < MIN_DBUS_HEADER_SIZE)
+      {
+        return FALSE;     
+      }
+
+    *header_complete = TRUE;    
+    gssize size = g_dbus_message_bytes_needed (buffer->data, buffer->pos, parse_error);
+    if (size < 0)
+      {
+        return FALSE;     
+      }
+
+    *message_size = size;
+    return buffer->pos >= size;
+  }
+
+static void 
+print_control_messages (Buffer *buffer)
+{
+  GList *node;
+  GUnixFDList *fd_list;
+  GCredentials *cred;
+
+  for (node = buffer->control_messages; node != NULL; node = node->next)
+  {
+    int type = g_socket_control_message_get_msg_type (node->data);
+    switch (type)
+      {
+        case SCM_RIGHTS:
+          fd_list = g_unix_fd_message_get_fd_list (node->data);
+          g_print (" <- SCM_RIGHTS (%d fds)\n", g_unix_fd_list_get_length (fd_list));
+          break;
+
+        case SCM_CREDENTIALS:
+          cred = g_unix_credentials_message_get_credentials (node->data);
+          gchar *descr = g_credentials_to_string (cred);
+          g_print (" <- SCM_CREDENTIALS (%s)\n", descr);
+          g_free (descr);
+          break;
+
+        default:
+          g_print (" <- control message with type %d\n", type);
+          break;
+      }    
+  }
+}
+
+
+static void 
+print_auth_message (
+  gboolean is_client, 
+  gboolean is_rewritten, 
+  Buffer *buffer, 
+  gssize msg_size
+)
+{
+  if (is_client)
+    {
+      g_print ("%sC: <- ", is_rewritten ? "rewritten to: " : "");
+    }
+  else 
+    {
+      g_print ("%sB: <- ", is_rewritten ? "rewritten to: " : "");
     }
 
-  /* For robustness we require the first char of the line to be an upper case letter.
-     This is not technically required by the dbus spec, but all commands are upper
-     case, and there is no provisioning for whitespace before the command, so in practice
-     this is true, and this means we're not confused by e.g. initial whitespace. */
-  if (line[0] < 'A' || line[0] > 'Z')
-    return FALSE;
+  g_assert (msg_size <= buffer->size);
+  gssize max_byte = MIN (msg_size, buffer->size);
+  print_as_ascii (buffer->data, max_byte);
+  g_print ("\n");
+}
 
+/**
+ * Returns position of first non-space character starting with 
+ * start_pos.
+ */
+static gssize 
+skip_spaces(const gchar *buffer, gssize size, gssize start_pos)
+{
+  gssize pos;
+  for (pos = start_pos; pos < size; pos++)
+  {
+    if (!g_ascii_isspace(buffer[pos]))
+      {
+        return pos;
+      }
+  }
+
+  return pos;
+}
+
+/**
+ * Skips words given in "words", ignoring case (for ASCII). If "words" 
+ * contains a space, skips all consecutive spaces in buffer.
+ *
+ * Returns new position after all skipped characters, or start_pos if 
+ * matching failed.
+ */
+static gssize 
+skip_words(
+  const gchar *words, 
+  const guchar *buffer, 
+  gssize size, 
+  gssize start_pos, 
+  gboolean skip_initial_space  
+) {
+  gssize pos = start_pos;
+  const gchar *words_pos = words;
+
+  if (skip_initial_space)
+    {
+      pos = skip_spaces (buffer, size, pos);
+      if (pos >= size) 
+        {
+          // No non-space characters found
+          return start_pos;     
+        }
+    }
+
+  while (*words_pos != '\0')
+    {
+      gchar w = *words_pos;
+      words_pos++;
+
+      if (pos >= size)
+        {
+          // Early end of string
+          return start_pos;          
+        }
+
+      if (w == ' ')
+        {
+          // There must be at least one space in buffer
+          if (!g_ascii_isspace (buffer[pos]))     
+            {
+              return start_pos;     
+            }
+
+          while (pos < size && g_ascii_isspace (buffer[pos]))
+            {
+              pos++; 
+            }
+        }
+      else 
+        {
+          if (g_ascii_tolower (w) != g_ascii_tolower (buffer[pos]))     
+            {
+              return start_pos; 
+            }
+
+          pos++;
+        }
+    }
+
+  return pos;
+}
+
+/**
+ * Skips all non-space characters starting from start_pos and 
+ * returns position of first space character or size if there are 
+ * no more space characters.
+ */
+static gssize 
+skip_till_space(const gchar *buffer, gssize size, gssize start_pos)
+{
+  gssize pos;
+  for (pos = start_pos; pos < size; pos++)
+  {
+    if (g_ascii_isspace(buffer[pos]))
+      {
+        return pos;
+      }
+  }
+
+  return pos;
+}
+
+static gint
+parse_hex_pair(gchar ch0, gchar ch1)
+{
+  if (!g_ascii_isxdigit(ch0) || !g_ascii_isxdigit(ch1))
+  {
+    return -1;
+  }
+
+  ch0 = g_ascii_toupper(ch0);
+  ch1 = g_ascii_toupper(ch1);
+
+  return (ch0 >= 'A' ? ch0 - 'A' : ch0 - '0') * 16 + 
+    (ch1 >= 'A' ? ch1 - 'A' : ch1 - '0');
+}
+
+/**
+ * Parses hex-encoded int like "31303030" as 1000.
+ */
+static gint
+parse_hex_encoded_int(const gchar *buf, gssize start, gssize length)
+{
+  if (length % 2 != 0)
+    {
+      return -1;     
+    }
+
+  gint number = 0;
+  for (gint pos = start; pos < start + length; pos+=2)
+    {      
+      gint byte = parse_hex_pair(buf[pos], buf[pos + 1]);
+      if (byte < 0 || byte < '0' || byte > '9')
+        {
+          return -1; 
+        }
+
+      if (number >= (0x7fffffff / 10))
+        {
+          // Overflow for uint
+          return -1; 
+        }
+
+      number = number * 10 + (byte - '0');
+    }
+
+  return number;
+}
+
+
+#define PHEI_BUFFER 20
+/**
+ * Encodes number like 1000 as "31303030" and places into a buffer.
+ * Returns position after last digit or start on error.
+ */
+static gssize 
+put_hex_encoded_int(gchar *buffer, gssize start, gssize buf_size, guint number)
+{
+  gchar tmp[PHEI_BUFFER];
+  gssize pos = start;
+  g_snprintf(tmp, PHEI_BUFFER, "%d", number);
+
+  for (gchar *tmp_char = tmp; *tmp_char != '\0'; tmp_char ++)
+    { 
+      if (pos + 3 >= buf_size)
+        {
+          return start;     
+        }
+
+      // 2 gidits + \0 = 3 bytes
+      g_snprintf(&buffer[pos], 3, "%02X", (gint)*tmp_char);
+      pos += 2;
+    }
+
+  return pos;
+}
+
+/**
+ * Checks whether buffer contains line "BEGIN" + whitespace or
+ * newline.
+ */
+static gboolean 
+is_auth_end_line (const gchar *buffer, gssize msg_size)
+{
+  gssize end_pos = skip_words("BEGIN", buffer, msg_size, 0, TRUE);
+  if (end_pos == 0)
+    {
+      return FALSE;     
+    }
+
+  // Check for whitespace characters
+  if (end_pos >= msg_size)
+    {
+      return FALSE;     
+    }
+
+  return g_ascii_isspace (buffer[end_pos]);
+}
+
+/**
+ * Returns TRUE if uid is in list.
+ */
+static gboolean 
+matches_uid_list (gint uid, GArray *list)
+{
+  gint i;
+  for (i = 0; i < list->len; i++)
+  {
+    if (g_array_index (list, gint, i) == uid) {
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Does message start with AUTH EXTERNAL?
+ */
+static gboolean 
+is_auth_uid_message (Buffer *buffer, gssize msg_size)
+{
+  gssize pos = skip_words("AUTH EXTERNAL ", buffer->data, buffer->size, 0, TRUE);
+  return pos > 0;
+}
+
+/**
+ * Receives a message like AUTH EXTERNAL 31303030\r\n and 
+ * replaced hex-encoded user id with proxy's user id.
+ *
+ * Sets size on tmp_buffer amtching size of new message.
+ *
+ * Returns TRUE on success, FALSE on error.
+ */
+static gboolean
+replace_auth_uid_message (Buffer *original, Buffer *tmp_buffer, gboolean check_uid, GArray *uids)
+{
+  gssize pos = 0;
+  tmp_buffer->pos = 0;  
+  pos = skip_words("AUTH EXTERNAL ", original->data, original->size, pos, TRUE);
+  if (pos == 0)
+    {
+      g_warning ("Cannot match words AUTH EXTERNAL in auth message");
+      return FALSE;     
+    }
+
+  gssize end_pos = skip_till_space(original->data, original->size, pos);
+  gint uid = parse_hex_encoded_int(original->data, pos, end_pos - pos);
+  if (uid < 0)
+  {
+    g_warning ("Failed to parse hex-encoded uid");
+    return FALSE; 
+  }
+
+  if (check_uid && !matches_uid_list (uid, uids))
+    {
+      g_warning ("Uid in AUTH EXTERNAL (%d) doesn't match whitelist", uid);
+      return FALSE;      
+    }
+
+  gssize prefix_len = pos;
+  if (prefix_len > tmp_buffer->size)
+    {
+      g_warning ("Not enough space in tmp_buffer");
+      return FALSE; 
+    }
+
+  memcpy (tmp_buffer->data, original->data, prefix_len);
+  gint my_uid = (gint)geteuid();
+  gssize tmp_end_pos = put_hex_encoded_int(tmp_buffer->data, prefix_len, tmp_buffer->size, my_uid);
+  if (tmp_end_pos == prefix_len)
+    {
+      g_warning ("Failed to write new hex-encoded uid");
+      return FALSE;
+    }
+
+  gssize suffix_len = original->size - end_pos;
+  if (tmp_end_pos + suffix_len > tmp_buffer->size)
+    {
+      g_warning ("Not enough space in tmp_buffer for suffix");
+      return FALSE;
+    }
+
+  memcpy (&tmp_buffer->data[tmp_end_pos], &original->data[end_pos], suffix_len);
+  tmp_buffer->size = tmp_end_pos + suffix_len;
   return TRUE;
 }
 
-static gboolean
-auth_line_is_begin (guint8 *line)
+static void 
+process_first_byte (ProxySide *side)
 {
-  guint8 next_char;
+  Buffer *buffer = side->read_buffer;
+  FlatpakProxyClient *client = side->client;
+  gssize msg_size = 1;
 
-  if (!g_str_has_prefix ((char *) line, AUTH_BEGIN))
-    return FALSE;
+  g_assert (side->read_buffer != NULL);
 
-  /* dbus-daemon accepts either nothing, or a whitespace followed by anything as end of auth */
-  next_char = line[strlen (AUTH_BEGIN)];
-  return next_char == 0 ||
-         next_char == ' ' ||
-         next_char == '\t';
+  side->got_first_byte = TRUE;
+  if (client->proxy->log_messages) 
+    {
+      g_print ("C: <- first byte (%02x)\n", buffer->data[0]);
+      print_control_messages (buffer);
+    }
+
+  side->read_buffer = buffer_split_tail (
+    get_default_buffer_size (side), side->read_buffer, msg_size, FALSE);
+
+  // Send to bus
+  queue_outgoing_buffer (&client->bus_side, buffer);
 }
 
-static gssize
-find_auth_end (FlatpakProxyClient *client, Buffer *buffer)
+static void 
+process_auth_message (ProxySide *side, gssize msg_size)
 {
-  goffset offset = 0;
-  gsize original_size = client->auth_buffer->len;
+  Buffer *buffer = side->read_buffer;
+  FlatpakProxyClient *client = side->client;
+  ProxySide *other_side = get_other_side (side);
+  gboolean is_client = (side == &client->client_side);
 
-  /* Add the new data to the remaining data from last iteration */
-  g_byte_array_append (client->auth_buffer, buffer->data, buffer->pos);
+  g_assert(side->read_buffer != NULL);
 
-  while (TRUE)
-    {
-      guint8 *line_start = client->auth_buffer->data + offset;
-      gsize remaining_data = client->auth_buffer->len - offset;
-      guint8 *line_end;
+  // Control messages should be moved to new buffer as they
+  // can go with DBus messages, but not with auth messages
+  side->read_buffer = buffer_split_tail (
+    get_default_buffer_size (side), buffer, msg_size, TRUE);
 
-      line_end = memmem (line_start, remaining_data,
-                         AUTH_LINE_SENTINEL, strlen (AUTH_LINE_SENTINEL));
-      if (line_end) /* Found end of line */
-        {
-          offset = (line_end + strlen (AUTH_LINE_SENTINEL) - line_start);
-
-          if (!auth_line_is_valid (line_start, line_end))
-            return FIND_AUTH_END_ABORT;
-
-          *line_end = 0;
-          if (auth_line_is_begin (line_start))
-            return offset - original_size;
-
-          /* continue with next line */
-        }
-      else
-        {
-          /* No end-of-line in this buffer */
-          g_byte_array_remove_range (client->auth_buffer, 0, offset);
-
-          /* Abort if more than 16k before newline, similar to what dbus-daemon does */
-          if (client->auth_buffer->len >= 16 * 1024)
-            return FIND_AUTH_END_ABORT;
-
-          return FIND_AUTH_END_CONTINUE;
-        }
+  if (client->proxy->log_messages)
+    {    
+      print_auth_message (is_client, FALSE, buffer, msg_size);
     }
+
+  if (is_auth_uid_message (buffer, msg_size))
+    {
+      // Replace uid in auth message
+      Buffer *tmp_buffer = buffer_new (msg_size + 100, NULL);
+      gboolean success = replace_auth_uid_message (
+        buffer, tmp_buffer, client->proxy->check_client_uid, client->proxy->accept_uids);
+      buffer_unref (buffer);
+
+      if (!success) 
+        {
+          g_warning ("User id in AUTH message doesn't match whitelist (or error rewriting AUTH line), rejecting connection");
+          side_closed(side);
+          return;
+        }
+
+      if (client->proxy->log_messages)
+        {
+          print_auth_message (is_client, TRUE, tmp_buffer, tmp_buffer->size);
+        }
+
+      queue_outgoing_buffer (other_side, tmp_buffer);
+      return;
+    }
+
+  gboolean is_auth_end = is_auth_end_line (buffer->data, msg_size);
+  queue_outgoing_buffer (other_side, buffer);
+
+  if (is_auth_end)
+    {
+      client->authenticated = TRUE;     
+    }
+}
+
+static void 
+process_dbus_message (ProxySide *side, gssize message_size)
+{
+  Buffer *buffer = side->read_buffer;
+  g_assert(buffer->size == message_size);
+
+  side->read_buffer = buffer_new (get_default_buffer_size (side), NULL);
+
+  got_buffer_from_side (side, buffer);
 }
 
 static gboolean
@@ -2594,100 +3175,117 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 {
   ProxySide *side = user_data;
   FlatpakProxyClient *client = side->client;
-  GError *error = NULL;
-  Buffer *buffer;
+  GError *parse_error = NULL;
+  Buffer *read_buffer;
   gboolean retval = G_SOURCE_CONTINUE;
+  gboolean message_complete;
+  gboolean header_complete;
+  gboolean message_too_long;
+  gssize message_size;
 
   g_object_ref (client);
 
-  while (!side->closed)
+  while (!side->closed) 
     {
-      if (!side->got_first_byte)
-        buffer = buffer_new (1, NULL);
-      else if (!client->authenticated)
-        buffer = buffer_new (64, NULL);
-      else
-        buffer = side->current_read_buffer;
-
-      if (!buffer_read (side, buffer, socket))
+      // If there is no read buffer yet, create an empty one 
+      if (!side->read_buffer) 
         {
-          if (buffer != side->current_read_buffer)
-            buffer_unref (buffer);
+          side->read_buffer = buffer_new (get_default_buffer_size (side), NULL);
+        }
+
+      read_buffer = side->read_buffer;
+
+      message_complete = check_if_message_is_complete (
+        side, 
+        side->read_buffer, 
+        &header_complete, 
+        &message_too_long,
+        &parse_error,
+        &message_size
+      );
+
+      if (parse_error)
+        {
+          if (client->proxy->log_messages)
+            {
+              const char *side_name = (side == &client->client_side) ? "client side": "bus side";
+              g_print (
+                "Failed to parse DBUS message header from %s, length %d bytes (%s), aborting\n", 
+                side_name,
+                read_buffer->pos,
+                parse_error->message
+              );
+              g_error_free (parse_error);
+            }
+          side_closed (side);
+          break;          
+        }
+
+      if (message_too_long)
+        {
+          if (client->proxy->log_messages)
+            {
+             g_print ("Message too long at stage '%s', aborting\n", get_stage_name (side));
+            }
+          side_closed (side);
           break;
         }
 
-      if (!client->authenticated)
+      // We try to allocate buffer of exact size, but sometimes we 
+      // don't know the required size beforehands, so we need to 
+      // extend the buffer.
+      if (buffer_is_full (side->read_buffer) && !message_complete) 
         {
-          if (buffer->pos > 0)
+          if (is_auth_stage (side)) 
             {
-              gboolean found_auth_end = FALSE;
-              gsize extra_data;
-
-              buffer->size = buffer->pos;
-              if (!side->got_first_byte)
-                {
-                  buffer->send_credentials = TRUE;
-                  side->got_first_byte = TRUE;
-                }
-              /* Look for end of authentication mechanism */
-              else if (side == &client->client_side)
-                {
-                  gssize auth_end = find_auth_end (client, buffer);
-
-                  if (auth_end >= 0)
-                    {
-                      found_auth_end = TRUE;
-                      buffer->size = auth_end;
-                      extra_data = buffer->pos - buffer->size;
-
-                      /* We may have gotten some extra data which is not part of
-                         the auth handshake, keep it for the next iteration. */
-                      if (extra_data > 0)
-                        side->extra_input_data = g_bytes_new (buffer->data + buffer->size, extra_data);
-                    }
-                  else if (auth_end == FIND_AUTH_END_ABORT)
-                    {
-                      buffer_unref (buffer);
-                      if (client->proxy->log_messages)
-                        g_print ("Invalid AUTH line, aborting\n");
-                      side_closed (side);
-                      break;
-                    }
-                }
-
-              got_buffer_from_side (side, buffer);
-
-              if (found_auth_end)
-                client->authenticated = TRUE;
+              side->read_buffer = buffer_new (read_buffer->size * 2, read_buffer); 
+              buffer_unref (read_buffer);
+              read_buffer = side->read_buffer;
             }
-          else
+          else if (is_post_auth_stage (side) && header_complete)
             {
-              buffer_unref (buffer);
+              // We have read the header and know full message size
+              g_assert (message_size > read_buffer->size);
+              side->read_buffer = buffer_new (message_size, read_buffer);
+              buffer_unref (read_buffer);
+              read_buffer = side->read_buffer;
+            }
+          else 
+            {
+              // Except for the cases above, the message should be complete at 
+              // this point
+              g_assert (FALSE);
             }
         }
-      else if (buffer->pos == buffer->size)
+
+      if (message_complete)
         {
-          if (buffer == &side->header_buffer)
+          // Process the message and replace read buffer with a new 
+          // one with rest of the data
+          if (is_first_byte_stage (side))
             {
-              gssize required;
-              required = g_dbus_message_bytes_needed (buffer->data, buffer->size, &error);
-              if (required < 0)
-                {
-                  g_warning ("Invalid message header read");
-                  side_closed (side);
-                }
-              else
-                {
-                  side->current_read_buffer = buffer_new (required, buffer);
-                }
+              process_first_byte (side);
             }
-          else
+          else if (is_auth_stage (side))
             {
-              got_buffer_from_side (side, buffer);
-              side->header_buffer.pos = 0;
-              side->current_read_buffer = &side->header_buffer;
+              process_auth_message (side, message_size);
             }
+          else 
+            {
+              process_dbus_message (side, message_size);
+            }
+
+          read_buffer = side->read_buffer;
         }
+      else 
+        {
+          g_assert (!buffer_is_full(read_buffer));
+
+          if (!buffer_read (side, read_buffer, socket))
+            {
+              break;
+            }
+        }        
     }
 
   if (side->closed)
@@ -2750,6 +3348,41 @@ client_connected_to_dbus (GObject      *source_object,
   start_reading (&client->bus_side);
 }
 
+/**
+ * Returns user id of connected process, or -1 if it cannot be 
+ * determined. 
+ */
+static gint 
+try_get_uid_for_connection (GSocketConnection *connection, pid_t *pid)
+{
+  *pid = 0;
+  GSocket *socket = g_socket_connection_get_socket (connection);
+  if (!socket) {
+    g_warning("Failed to get socket from connection when checking remote user credentials");
+    return -1;
+  }
+
+  GError *error = NULL;
+  GCredentials *cred = g_socket_get_credentials (socket, &error);
+  if (!cred) {
+    g_warning ("Failed to get remote user credentials from socket: %s", error->message);
+    g_clear_error(&error);
+    return -1;
+  }
+
+  uid_t uid = g_credentials_get_unix_user (cred, &error);
+  if (uid == (uid_t)-1) {
+    g_warning ("Failed to get user id from credentials: %s", error->message);
+    g_clear_error(&error);
+    return -1;
+  }
+
+  // Ignore error here
+  *pid = g_credentials_get_unix_pid (cred, NULL);
+
+  return (gint)uid;
+}
+
 static gboolean
 flatpak_proxy_incoming (GSocketService    *service,
                         GSocketConnection *connection,
@@ -2757,6 +3390,26 @@ flatpak_proxy_incoming (GSocketService    *service,
 {
   FlatpakProxy *proxy = FLATPAK_PROXY (service);
   FlatpakProxyClient *client;
+
+  // Check who is connecting to us
+  if (proxy->check_client_uid) {
+    pid_t pid = 0;
+    gint client_uid = try_get_uid_for_connection (connection, &pid);
+    if (client_uid < 0) {
+      g_warning ("Cannot determine credentials of connecting user, and rejecting connection because user id validation is selected");
+      return TRUE;
+    }
+
+    if (proxy->log_messages)
+      {
+        g_print ("Got connection from uid %d, pid %d\n", client_uid, pid);
+      }
+
+    if (!matches_uid_list (client_uid, proxy->accept_uids)) {
+      g_warning ("Client user id %d doesn't match allowed whitelist, rejecting connection", client_uid);
+      return TRUE;
+    }
+  }
 
   client = flatpak_proxy_client_new (proxy, connection);
 
@@ -2770,6 +3423,8 @@ flatpak_proxy_incoming (GSocketService    *service,
 static void
 flatpak_proxy_init (FlatpakProxy *proxy)
 {
+  proxy->accept_uids = g_array_new(FALSE, TRUE, sizeof(gint));
+  proxy->check_client_uid = FALSE;
   proxy->filters = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) filter_list_free);
   flatpak_proxy_add_policy (proxy, "org.freedesktop.DBus", FALSE, FLATPAK_POLICY_TALK);
 }

@@ -61,6 +61,9 @@ void         flatpak_proxy_add_broadcast_rule (FlatpakProxy *proxy,
                                                const char   *name,
                                                gboolean      name_is_subtree,
                                                const char   *rule);
+void         flatpak_proxy_set_accepted_uids (FlatpakProxy *proxy,
+                                          GArray* uids);
+
 gboolean     flatpak_proxy_start (FlatpakProxy *proxy,
                                   GError      **error);
 void         flatpak_proxy_stop (FlatpakProxy *proxy);
