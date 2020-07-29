@@ -2564,7 +2564,7 @@ find_auth_end (FlatpakProxyClient *client, Buffer *buffer)
                          AUTH_LINE_SENTINEL, strlen (AUTH_LINE_SENTINEL));
       if (line_end) /* Found end of line */
         {
-          offset = (line_end + strlen (AUTH_LINE_SENTINEL) - line_start);
+          offset = (line_end + strlen (AUTH_LINE_SENTINEL) - client->auth_buffer->data);
 
           if (!auth_line_is_valid (line_start, line_end))
             return FIND_AUTH_END_ABORT;
