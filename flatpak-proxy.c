@@ -2092,7 +2092,8 @@ static gboolean
 validate_arg0_match (FlatpakProxyClient *client, Buffer *buffer)
 {
   GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
-  GVariant *body, *arg0;
+  GVariant *body;
+  g_autoptr(GVariant) arg0 = NULL;
   const char *match;
   gboolean res = TRUE;
 
@@ -2114,7 +2115,8 @@ static gboolean
 validate_arg0_name (FlatpakProxyClient *client, Buffer *buffer, FlatpakPolicy required_policy, FlatpakPolicy *has_policy)
 {
   GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
-  GVariant *body, *arg0;
+  GVariant *body;
+  g_autoptr(GVariant) arg0 = NULL;
   const char *name;
   FlatpakPolicy name_policy;
   gboolean res = FALSE;
@@ -2147,7 +2149,8 @@ static Buffer *
 filter_names_list (FlatpakProxyClient *client, Buffer *buffer)
 {
   GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
-  GVariant *body, *arg0, *new_names;
+  GVariant *body, *new_names;
+  g_autoptr(GVariant) arg0 = NULL;
   const gchar **names;
   int i;
   GVariantBuilder builder;
@@ -2193,7 +2196,10 @@ static gboolean
 should_filter_name_owner_changed (FlatpakProxyClient *client, Buffer *buffer)
 {
   GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
-  GVariant *body, *arg0, *arg1, *arg2;
+  GVariant *body;
+  g_autoptr(GVariant) arg0 = NULL;
+  g_autoptr(GVariant) arg1 = NULL;
+  g_autoptr(GVariant) arg2 = NULL;
   const gchar *name, *new;
   gboolean filter = TRUE;
 
@@ -2389,7 +2395,8 @@ static void
 queue_wildcard_initial_name_ops (FlatpakProxyClient *client, Header *header, Buffer *buffer)
 {
   GDBusMessage *decoded_message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
-  GVariant *body, *arg0;
+  GVariant *body;
+  g_autoptr(GVariant) arg0 = NULL;
 
   if (decoded_message != NULL &&
       header->type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN &&
