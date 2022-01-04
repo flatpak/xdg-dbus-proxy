@@ -346,7 +346,10 @@ start_proxy (GPtrArray *args, int *args_i)
 
   if (!flatpak_proxy_start (proxy, &error))
     {
-      g_printerr ("Failed to start proxy for %s: %s\n", bus_address, error->message);
+      if (error != NULL)
+        {
+          g_printerr ("Failed to start proxy for %s: %s\n", bus_address, error->message);
+        }
       return FALSE;
     }
 
