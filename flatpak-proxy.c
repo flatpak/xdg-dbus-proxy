@@ -742,6 +742,15 @@ flatpak_proxy_get_property (GObject    *object,
     }
 }
 
+/* Buffer contains a default size of data that is 16 bytes, so that
+   it can be used on the stack for reading the header. However we
+   also support passing in sizes smaller that 16, which will allocate
+   a smaller object than the full Buffer object. This is safe as we
+   respect the size member, however there is no way for GCC to know this,
+   so we silence it manually.
+*/
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
 static Buffer *
 buffer_new (gsize size, Buffer *old)
 {
@@ -764,6 +773,7 @@ buffer_new (gsize size, Buffer *old)
 
   return buffer;
 }
+#pragma GCC diagnostic pop
 
 static ProxySide *
 get_other_side (ProxySide *side)
