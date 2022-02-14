@@ -80,3 +80,132 @@ jobs:
     - name: distcheck
       run: |
         make -C _build -j $(getconf _NPROCESSORS_ONLN) distcheck VERBOSE=1
+
+  clang:
+    name: Build with clang and analyze
+    runs-on: ubuntu-18.04
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+        - cpp
+        # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python' ]
+        # Learn more:
+        # https://docs.github.com/en/free-pro-team@latest/github/finding-security-vulnerabilities-and-errors-in-your-code/configuring-code-scanning#changing-the-languages-that-are-analyzed
+    steps:
+    # Initializes the CodeQL tools for scanning.
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v1
+      with:
+        languages: ${{ matrix.language }}
+        # If you wish to specify custom queries, you can do so here or in a config file.
+        # By default, queries listed here will override any specified in a config file.
+        # Prefix the list here with "+" to use these queries and those in the config file.
+        # queries: ./path/to/local/query, your-org/your-repo/queries@main
+    - name: Install Dependencies
+      run: |
+        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
+        sudo apt-get update
+        sudo apt-get update
+        sudo apt-get install -y \
+          autoconf \
+          autoconf-archive \
+          automake \
+          autopoint \
+          clang \
+          dbus \
+          docbook-xml \
+          docbook-xsl \
+          libglib2.0-dev \
+          libtool \
+          xsltproc \
+          ${NULL+}
+    - name: Check out xdg-dbus-proxy
+      uses: actions/checkout@v1
+      with:
+        submodules: true
+    - name: autoreconf
+      run: autoreconf -fi
+    - name: configure
+      run: ./configure
+      env:
+        CC: clang
+        CFLAGS: >-
+          -O2
+          -Wp,-D_FORTIFY_SOURCE=2
+          -fsanitize=address
+          -fsanitize=undefined
+    - name: Build xdg-dbus-proxy
+      run: make -j $(getconf _NPROCESSORS_ONLN) V=1
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v1
+    - name: Run tests
+      run: make -j $(getconf _NPROCESSORS_ONLN) check VERBOSE=1
+    - name: Collect overall test logs on failure
+      if: failure()
+      run: mv test-suite.log test-logs/ || true
+    - name: Collect individual test logs on cancel
+      if: failure() || cancelled()
+      run: mv tests/*.log test-logs/ || true
+    - name: Upload test logs
+      uses: actions/upload-artifact@v1
+      if: failure() || cancelled()
+      with:
+        name: test logs
+        path: test-logs
+
+  valgrind:
+    name: Run tests in valgrind
+    needs: check # Don't run expensive test if main check fails
+    runs-on: ubuntu-20.04 # Might as well test with a different one too
+    steps:
+    - name: Install Dependencies
+      run: |
+        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
+        sudo apt-get update
+        sudo apt-get install -y \
+          autoconf \
+          autoconf-archive \
+          automake \
+          autopoint \
+          clang \
+          dbus \
+          docbook-xml \
+          docbook-xsl \
+          libglib2.0-dev \
+          libtool \
+          valgrind \
+          xsltproc \
+          ${NULL+}
+    - name: Check out xdg-dbus-proxy
+      uses: actions/checkout@v1
+      with:
+        submodules: true
+    - name: Create logs dir
+      run: mkdir test-logs
+    - name: autoreconf
+      run: autoreconf -fi
+    - name: configure
+      run: |
+        mkdir _build
+        ( cd _build && ../configure )
+      env:
+        CFLAGS: >-
+          -O2
+          -Wp,-D_FORTIFY_SOURCE=2
+    - name: Build xdg-dbus-proxy
+      run: make -C _build -j $(getconf _NPROCESSORS_ONLN) V=1
+    - name: Run tests
+      run: make -C _build -j $(getconf _NPROCESSORS_ONLN) check VERBOSE=1
+    - name: Collect overall test logs on failure
+      if: failure()
+      run: mv _build/test-suite.log test-logs/ || true
+    - name: Collect individual test logs on cancel
+      if: failure() || cancelled()
+      run: mv _build/tests/*.log test-logs/ || true
+    - name: Upload test logs
+      uses: actions/upload-artifact@v1
+      if: failure() || cancelled()
+      with:
+        name: test logs
+        path: test-logs
