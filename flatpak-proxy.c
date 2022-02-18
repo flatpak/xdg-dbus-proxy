@@ -1785,6 +1785,13 @@ policy_from_handler (BusHandler handler)
     case HANDLE_VALIDATE_SEE:
       return FLATPAK_POLICY_SEE;
 
+    case HANDLE_DENY:
+    case HANDLE_FILTER_GET_OWNER_REPLY:
+    case HANDLE_FILTER_HAS_OWNER_REPLY:
+    case HANDLE_FILTER_NAME_LIST_REPLY:
+    case HANDLE_HIDE:
+    case HANDLE_PASS:
+    case HANDLE_VALIDATE_MATCH:
     default:
       return FLATPAK_POLICY_NONE;
     }
