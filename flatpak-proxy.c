@@ -827,7 +827,7 @@ buffer_read (ProxySide *side,
              Buffer    *buffer,
              GSocket   *socket)
 {
-  gssize res;
+  gsize received;
   GInputVector v;
   GError *error = NULL;
   GSocketControlMessage **messages;
@@ -838,14 +838,15 @@ buffer_read (ProxySide *side,
       gsize extra_size;
       const guchar *extra_bytes = g_bytes_get_data (side->extra_input_data, &extra_size);
 
-      res = MIN (extra_size, buffer->size - buffer->pos);
-      memcpy (&buffer->data[buffer->pos], extra_bytes, res);
+      g_assert (buffer->size >= buffer->pos);
+      received = MIN (extra_size, buffer->size - buffer->pos);
+      memcpy (&buffer->data[buffer->pos], extra_bytes, received);
 
-      if (res < extra_size)
+      if (received < extra_size)
         {
           side->extra_input_data =
-            g_bytes_new_with_free_func (extra_bytes + res,
-                                        extra_size - res,
+            g_bytes_new_with_free_func (extra_bytes + received,
+                                        extra_size - received,
                                         (GDestroyNotify) g_bytes_unref,
                                         side->extra_input_data);
         }
@@ -856,6 +857,7 @@ buffer_read (ProxySide *side,
     }
   else
     {
+      gssize res;
       int flags = 0;
       v.buffer = &buffer->data[buffer->pos];
       v.size = buffer->size - buffer->pos;
@@ -882,13 +884,16 @@ buffer_read (ProxySide *side,
           return FALSE;
         }
 
+      /* We now know res is strictly positive */
+      received = (gsize) res;
+
       for (i = 0; i < num_messages; i++)
         buffer->control_messages = g_list_append (buffer->control_messages, messages[i]);
 
       g_free (messages);
     }
 
-  buffer->pos += res;
+  buffer->pos += received;
   return TRUE;
 }
 
