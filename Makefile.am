@@ -27,6 +27,8 @@ include tests/Makefile.am.inc
 
 EXTRA_DIST += build-aux/glib-tap.mk
 EXTRA_DIST += build-aux/tap-test
+EXTRA_DIST += meson.build
+EXTRA_DIST += meson_options.txt
 
 # Add rules for code-coverage testing, as defined by AX_CODE_COVERAGE
 include $(top_srcdir)/aminclude_static.am

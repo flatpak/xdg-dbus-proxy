@@ -1,0 +1,12 @@
+option(
+  'man',
+  type : 'feature',
+  description : 'generate man pages',
+  value : 'auto',
+)
+option(
+  'program_prefix',
+  type : 'string',
+  description : 'Prepend string to executable name, for use with subprojects',
+  value : '',
+)
