@@ -158,7 +158,7 @@ add_args (GBytes    *bytes,
 
 
 static gboolean
-parse_generic_args (GPtrArray *args, int *args_i)
+parse_generic_args (GPtrArray *args, guint *args_i)
 {
   const char *arg = g_ptr_array_index (args, *args_i);
 
@@ -226,7 +226,7 @@ parse_generic_args (GPtrArray *args, int *args_i)
 }
 
 static gboolean
-start_proxy (GPtrArray *args, int *args_i)
+start_proxy (GPtrArray *args, guint *args_i)
 {
   g_autoptr(FlatpakProxy) proxy = NULL;
   g_autoptr(GError) error = NULL;
@@ -374,7 +374,8 @@ main (int argc, const char *argv[])
 {
   g_autoptr(GPtrArray) args = NULL;
   GMainLoop *service_loop;
-  int i, args_i;
+  int i;
+  guint args_i;
 
   setlocale (LC_ALL, "");
 
