@@ -2349,17 +2349,15 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
         {
           expected_reply = steal_expected_reply (get_other_side (side), header->reply_serial);
 
-          /* We only allow replies we expect */
-          if (expected_reply == EXPECTED_REPLY_NONE)
+          switch (expected_reply)
             {
+            case EXPECTED_REPLY_NONE:
+              /* We only allow replies we expect */
               if (client->proxy->log_messages)
                 g_print ("*Unexpected reply*\n");
               buffer_unref (buffer);
               return;
-            }
 
-          switch (expected_reply)
-            {
             case EXPECTED_REPLY_HELLO:
               /* When we get the initial reply to Hello, allow all
                  further communications to our own unique id. */
