@@ -30,6 +30,8 @@ add_project_arguments(
     '-Werror=return-type',
     '-Werror=shadow',
     '-Werror=strict-prototypes',
+    '-Werror=switch-default',
+    '-Wswitch-enum',
 
     # Deliberately not warning about this, ability to zero-initialize
     # a struct is a feature
