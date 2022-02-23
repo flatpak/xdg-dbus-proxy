@@ -2357,10 +2357,9 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
               if (header->type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN)
                 {
                   g_autofree char *my_id = get_arg0_string (buffer);
-                  flatpak_proxy_client_update_unique_id_policy (client, my_id, FLATPAK_POLICY_TALK);
-                  break;
+                  flatpak_proxy_client_update_unique_id_policy (client, my_id, FLATPAK_POLICY_TALK);  
                 }
-
+              break;
             case EXPECTED_REPLY_REWRITE:
               /* Replace a roundtrip ping with the rewritten message */
 
