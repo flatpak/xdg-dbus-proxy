@@ -366,7 +366,6 @@ sync_closed_cb (GIOChannel  *source,
     flatpak_proxy_stop (FLATPAK_PROXY (l->data));
 
   exit (0);
-  return TRUE;
 }
 
 int
