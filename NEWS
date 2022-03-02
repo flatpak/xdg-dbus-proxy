@@ -3,6 +3,7 @@ Changes in 0.1.3
 
  * Silence compiler warnings
  * Fix build with musl
+ * Fix UTF-8 characters being converted to ? when printing messages
 
 Changes in 0.1.2
 ================
