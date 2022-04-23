@@ -87,4 +87,6 @@ if xsltproc.found() and not meson.is_subproject()
   )
 endif
 
-subdir('tests')
+if get_option('tests')
+  subdir('tests')
+endif
