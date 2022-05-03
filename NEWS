@@ -1,5 +1,23 @@
+Changes in 0.1.4
+================
+
+Not released yet
+
+  * Add a Meson build system, with support for being used as a subproject.
+    The original Autotools build system remains available for now, but
+    might be removed in future.
+  * Fix movement through multiline auth messages
+  * Fix an unintended fallthrough if the message bus replies to Hello()
+    with a non-REPLY such as an ERROR
+  * Fix compiler warnings
+  * Update AX_CODE_COVERAGE from autoconf-archive
+  * Bundle a copy of AX_CHECK_GNU_MAKE from autoconf-archive, required
+    by AX_CODE_COVERAGE
+
 Changes in 0.1.3
 ================
+
+Released 2022-02-11
 
  * Silence compiler warnings
  * Fix build with musl
