@@ -14,6 +14,25 @@ common_include_directories = include_directories('.')
 
 add_project_arguments(
   cc.get_supported_arguments([
+    '-Werror=aggregate-return',
+    '-Werror=empty-body',
+    '-Werror=implicit-function-declaration',
+    '-Werror=incompatible-pointer-types',
+    '-Werror=init-self',
+    '-Werror=int-conversion',
+    '-Werror=misleading-indentation',
+    '-Werror=missing-declarations',
+    '-Werror=missing-include-dirs',
+    '-Werror=missing-prototypes',
+    '-Werror=overflow',
+    '-Werror=parenthesis',
+    '-Werror=pointer-arith',
+    '-Werror=return-type',
+    '-Werror=shadow',
+    '-Werror=strict-prototypes',
+    '-Werror=switch-default',
+    '-Wswitch-enum',
+
     # Deliberately not warning about this, ability to zero-initialize
     # a struct is a feature
     '-Wno-missing-field-initializers',
