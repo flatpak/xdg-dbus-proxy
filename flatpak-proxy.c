@@ -2358,8 +2358,10 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
                 {
                   g_autofree char *my_id = get_arg0_string (buffer);
                   flatpak_proxy_client_update_unique_id_policy (client, my_id, FLATPAK_POLICY_TALK);
-                  break;
                 }
+              /* ... else it's an ERROR or something. Either way, pass it
+               * through to the client unedited. */
+              break;
 
             case EXPECTED_REPLY_REWRITE:
               /* Replace a roundtrip ping with the rewritten message */
