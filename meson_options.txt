@@ -1,4 +1,10 @@
 option(
+  'installed_tests',
+  type : 'boolean',
+  description : 'Build and install "as-installed" tests',
+  value : 'false',
+)
+option(
   'man',
   type : 'feature',
   description : 'generate man pages',
