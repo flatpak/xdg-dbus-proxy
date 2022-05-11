@@ -1,7 +1,7 @@
 Changes in 0.1.4
 ================
 
-Not released yet
+Released 2022-05-11
 
   * Add a Meson build system, with support for being used as a subproject.
     The original Autotools build system remains available for now, but
