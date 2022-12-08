@@ -1,3 +1,7 @@
+enable_installed_tests = get_option('installed_tests') and not meson.is_subproject()
+installed_testdir = get_option('libexecdir') / 'installed-tests' / meson.project_name()
+installed_tests_metadir = get_option('datadir') / 'installed-tests' / meson.project_name()
+
 test_programs = [
   [
     'test-proxy',
@@ -6,6 +10,8 @@ test_programs = [
       'test-proxy.c',
       dependencies : common_deps,
       include_directories : common_include_directories,
+      install : enable_installed_tests,
+      install_dir : installed_testdir,
     ),
   ],
 ]
@@ -30,6 +36,18 @@ foreach pair : test_programs
       name,
       test_program,
       env : test_env,
+    )
+  endif
+
+  if enable_installed_tests
+    configure_file(
+      input : 'tap.test.in',
+      output : name + '.test',
+      configuration : {
+        'basename' : name,
+        'installed_testdir' : get_option('prefix') / installed_testdir,
+      },
+      install_dir : installed_tests_metadir,
     )
   endif
 endforeach
