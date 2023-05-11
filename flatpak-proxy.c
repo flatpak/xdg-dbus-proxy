@@ -186,11 +186,13 @@
 
 typedef struct FlatpakProxyClient FlatpakProxyClient;
 
-#define FIND_AUTH_END_CONTINUE -1
-#define FIND_AUTH_END_ABORT -2
+#define FIND_AUTH_END_ABORT -1
 
 #define AUTH_LINE_SENTINEL "\r\n"
 #define AUTH_BEGIN "BEGIN"
+#define AUTH_OK    "OK"
+#define AUTH_NEGOTIATE_FD "NEGOTIATE_UNIX_FD"
+#define AUTH_AGREE_FD     "AGREE_UNIX_FD"
 
 typedef enum {
   EXPECTED_REPLY_NONE,
@@ -269,7 +271,6 @@ typedef struct
   GSource            *in_source;
   GSource            *out_source;
 
-  GBytes             *extra_input_data;
   Buffer             *current_read_buffer;
   Buffer              header_buffer;
 
@@ -279,14 +280,23 @@ typedef struct
   GHashTable         *expected_replies;
 } ProxySide;
 
+enum {
+  AUTH_INIT,
+
+  AUTH_FOUND_OK,
+  AUTH_FOUND_BEGIN,
+  AUTH_FOUND_NEGOTIATE,
+  AUTH_COMPLETE
+};
+
 struct FlatpakProxyClient
 {
   GObject       parent;
 
   FlatpakProxy *proxy;
 
-  gboolean      authenticated;
-  GByteArray   *auth_buffer;
+  guint8        auth_state;
+  gboolean      auth_has_negotiate_fd;
 
   ProxySide     client_side;
   ProxySide     bus_side;
@@ -384,7 +394,6 @@ static void
 free_side (ProxySide *side)
 {
   g_clear_object (&side->connection);
-  g_clear_pointer (&side->extra_input_data, g_bytes_unref);
 
   g_list_free_full (side->buffers, (GDestroyNotify) buffer_unref);
   g_list_free_full (side->control_messages, (GDestroyNotify) g_object_unref);
@@ -405,7 +414,6 @@ flatpak_proxy_client_finalize (GObject *object)
   client->proxy->clients = g_list_remove (client->proxy->clients, client);
   g_clear_object (&client->proxy);
 
-  g_byte_array_free (client->auth_buffer, TRUE);
   g_hash_table_destroy (client->rewrite_reply);
   g_hash_table_destroy (client->get_owner_reply);
   g_hash_table_destroy (client->unique_id_policy);
@@ -442,7 +450,6 @@ flatpak_proxy_client_init (FlatpakProxyClient *client)
   init_side (client, &client->client_side);
   init_side (client, &client->bus_side);
 
-  client->auth_buffer = g_byte_array_new ();
   client->rewrite_reply = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, g_object_unref);
   client->get_owner_reply = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, g_free);
   client->unique_id_policy = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -826,10 +833,76 @@ side_closed (ProxySide *side)
     }
 }
 
+/* This function is to avoid situations like this
+ *
+ * BEGIN\r\nl\0\0\1...
+ *
+ * e.g. where we read into the first D-Bus message while waiting for
+ * the final line from the client
+ */
+static gssize
+_my_g_socket_receive_message_safe (GSocket* socket,
+                                   GSocketAddress** address,
+                                   GInputVector* vector,
+                                   GSocketControlMessage*** messages,
+                                   gint* num_messages,
+                                   gint* flags,
+                                   GCancellable* cancellable,
+                                   GError** error)
+{
+  GString *str;
+  gchar c;
+  gssize num_read = 0;
+  gboolean last_was_cr;
+  GInputVector v;
+
+  str = g_string_new (NULL);
+
+  last_was_cr = FALSE;
+  v.buffer = &c;
+  v.size = 1;
+
+  /* receive one byte at a time until we have enough data for the vector 
+   * or we get \r\n
+   */
+  while (str->len < vector->size)
+    {
+      num_read = g_socket_receive_message (socket, address, &v, 1,
+                                           messages,
+                                           num_messages,
+                                           flags, cancellable, error);
+
+      if (num_read <= 0)
+        goto out;
+
+      g_string_append_c (str, (gint) c);
+      if (last_was_cr)
+        {
+          if (c == 0x0a)
+            {
+              g_assert (str->len >= 2);
+              goto out;
+            }
+        }
+      last_was_cr = (c == 0x0d);
+    }
+
+ out:
+  if (vector->buffer != NULL && str->len > 0)
+    {
+      memcpy(vector->buffer, str->str, str->len);
+    }
+  if (num_read >= 0)
+    num_read = str->len;
+  g_string_free (str, TRUE);
+  return num_read;
+}
+
 static gboolean
 buffer_read (ProxySide *side,
              Buffer    *buffer,
-             GSocket   *socket)
+             GSocket   *socket,
+             gboolean  is_authenticated)
 {
   gsize received;
   GInputVector v;
@@ -837,65 +910,47 @@ buffer_read (ProxySide *side,
   GSocketControlMessage **messages;
   int num_messages, i;
 
-  if (side->extra_input_data)
-    {
-      gsize extra_size;
-      const guchar *extra_bytes = g_bytes_get_data (side->extra_input_data, &extra_size);
+  gssize res;
+  int flags = 0;
+  v.buffer = &buffer->data[buffer->pos];
+  v.size = buffer->size - buffer->pos;
 
-      g_assert (buffer->size >= buffer->pos);
-      received = MIN (extra_size, buffer->size - buffer->pos);
-      memcpy (&buffer->data[buffer->pos], extra_bytes, received);
-
-      if (received < extra_size)
-        {
-          side->extra_input_data =
-            g_bytes_new_with_free_func (extra_bytes + received,
-                                        extra_size - received,
-                                        (GDestroyNotify) g_bytes_unref,
-                                        side->extra_input_data);
-        }
-      else
-        {
-          g_clear_pointer (&side->extra_input_data, g_bytes_unref);
-        }
-    }
+  if (is_authenticated || buffer->size == 1)
+    res = g_socket_receive_message (socket, NULL, &v, 1,
+                                    &messages,
+                                    &num_messages,
+                                    &flags, NULL, &error);
   else
+    res = _my_g_socket_receive_message_safe (socket, NULL, &v,
+                                             &messages,
+                                             &num_messages,
+                                             &flags, NULL, &error);
+
+  if (res < 0 && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
     {
-      gssize res;
-      int flags = 0;
-      v.buffer = &buffer->data[buffer->pos];
-      v.size = buffer->size - buffer->pos;
-
-      res = g_socket_receive_message (socket, NULL, &v, 1,
-                                      &messages,
-                                      &num_messages,
-                                      &flags, NULL, &error);
-      if (res < 0 && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
-        {
-          g_error_free (error);
-          return FALSE;
-        }
-
-      if (res <= 0)
-        {
-          if (res != 0)
-            {
-              g_debug ("Error reading from socket: %s", error->message);
-              g_error_free (error);
-            }
-
-          side_closed (side);
-          return FALSE;
-        }
-
-      /* We now know res is strictly positive */
-      received = (gsize) res;
-
-      for (i = 0; i < num_messages; i++)
-        buffer->control_messages = g_list_append (buffer->control_messages, messages[i]);
-
-      g_free (messages);
+      g_error_free (error);
+      return FALSE;
     }
+
+  if (res <= 0)
+    {
+      if (res != 0)
+        {
+          g_debug ("Error reading from socket: %s", error->message);
+          g_error_free (error);
+        }
+
+      side_closed (side);
+      return FALSE;
+    }
+
+  /* We now know res is strictly positive */
+  received = (gsize) res;
+
+  for (i = 0; i < num_messages; i++)
+    buffer->control_messages = g_list_append (buffer->control_messages, messages[i]);
+
+  g_free (messages);
 
   buffer->pos += received;
   return TRUE;
@@ -2160,7 +2215,7 @@ got_buffer_from_client (FlatpakProxyClient *client, ProxySide *side, Buffer *buf
 {
   ExpectedReplyType expecting_reply = EXPECTED_REPLY_NONE;
 
-  if (client->authenticated && client->proxy->filter)
+  if (client->auth_state == AUTH_COMPLETE && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
       BusHandler handler;
@@ -2328,7 +2383,7 @@ handle_deny:
 static void
 got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer)
 {
-  if (client->authenticated && client->proxy->filter)
+  if (client->auth_state == AUTH_COMPLETE && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
       GDBusMessage *rewritten;
@@ -2556,63 +2611,44 @@ auth_line_is_valid (guint8 *line, guint8 *line_end)
   return TRUE;
 }
 
-static gboolean
-auth_line_is_begin (guint8 *line)
-{
-  guint8 next_char;
-
-  if (!g_str_has_prefix ((char *) line, AUTH_BEGIN))
-    return FALSE;
-
-  /* dbus-daemon accepts either nothing, or a whitespace followed by anything as end of auth */
-  next_char = line[strlen (AUTH_BEGIN)];
-  return next_char == 0 ||
-         next_char == ' ' ||
-         next_char == '\t';
-}
-
 static gssize
 find_auth_end (FlatpakProxyClient *client, Buffer *buffer)
 {
-  goffset offset = 0;
-  gsize original_size = client->auth_buffer->len;
+  gssize new_state = client->auth_state;
+  GString* str = NULL;
 
-  /* Add the new data to the remaining data from last iteration */
-  g_byte_array_append (client->auth_buffer, buffer->data, buffer->pos);
+  if (!auth_line_is_valid (buffer->data, buffer->data + buffer->size - 2 /* ignore the \r\n */))
+    return FIND_AUTH_END_ABORT;
 
-  while (TRUE)
-    {
-      guint8 *line_start = client->auth_buffer->data + offset;
-      gsize remaining_data = client->auth_buffer->len - offset;
-      guint8 *line_end;
+  str = g_string_new_len((char *) buffer->data, buffer->size);
 
-      line_end = memmem (line_start, remaining_data,
-                         AUTH_LINE_SENTINEL, strlen (AUTH_LINE_SENTINEL));
-      if (line_end) /* Found end of line */
-        {
-          offset = (line_end + strlen (AUTH_LINE_SENTINEL) - client->auth_buffer->data);
+  switch (client->auth_state)
+  {
+    case AUTH_INIT:
+      if (g_str_has_prefix(str->str, AUTH_NEGOTIATE_FD))
+        client->auth_has_negotiate_fd = TRUE;
+      else if (g_str_has_prefix (str->str, AUTH_BEGIN))
+        new_state = AUTH_FOUND_BEGIN;
+      else if (g_str_has_prefix(str->str, AUTH_OK))
+        new_state = AUTH_FOUND_OK;
+      break;
+    case AUTH_FOUND_OK:
+      if (g_str_has_prefix (str->str, AUTH_BEGIN))
+        new_state = client->auth_has_negotiate_fd ? AUTH_FOUND_NEGOTIATE : AUTH_COMPLETE;
+      break;
+    case AUTH_FOUND_BEGIN:
+      if (g_str_has_prefix(str->str, AUTH_OK))
+        new_state = client->auth_has_negotiate_fd ? AUTH_FOUND_NEGOTIATE : AUTH_COMPLETE;
+      break;
+    case AUTH_FOUND_NEGOTIATE:
+      if (g_str_has_prefix(str->str, AUTH_AGREE_FD))
+        new_state = AUTH_COMPLETE;
+    default:
+      break;
+  }
 
-          if (!auth_line_is_valid (line_start, line_end))
-            return FIND_AUTH_END_ABORT;
-
-          *line_end = 0;
-          if (auth_line_is_begin (line_start))
-            return offset - original_size;
-
-          /* continue with next line */
-        }
-      else
-        {
-          /* No end-of-line in this buffer */
-          g_byte_array_remove_range (client->auth_buffer, 0, offset);
-
-          /* Abort if more than 16k before newline, similar to what dbus-daemon does */
-          if (client->auth_buffer->len >= 16 * 1024)
-            return FIND_AUTH_END_ABORT;
-
-          return FIND_AUTH_END_CONTINUE;
-        }
-    }
+  g_string_free(str, TRUE);
+  return new_state;
 }
 
 static gboolean
@@ -2630,24 +2666,23 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
     {
       if (!side->got_first_byte)
         buffer = buffer_new (1, NULL);
-      else if (!client->authenticated)
+      else if (client->auth_state != AUTH_COMPLETE)
         buffer = buffer_new (64, NULL);
       else
         buffer = side->current_read_buffer;
 
-      if (!buffer_read (side, buffer, socket))
+      if (!buffer_read (side, buffer, socket, client->auth_state == AUTH_COMPLETE))
         {
           if (buffer != side->current_read_buffer)
             buffer_unref (buffer);
           break;
         }
 
-      if (!client->authenticated)
+      if (client->auth_state != AUTH_COMPLETE)
         {
           if (buffer->pos > 0)
             {
-              gboolean found_auth_end = FALSE;
-              gsize extra_data;
+              gssize new_state = client->auth_state;
 
               buffer->size = buffer->pos;
               if (!side->got_first_byte)
@@ -2656,22 +2691,11 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                   side->got_first_byte = TRUE;
                 }
               /* Look for end of authentication mechanism */
-              else if (side == &client->client_side)
+              else
                 {
-                  gssize auth_end = find_auth_end (client, buffer);
+                  new_state = find_auth_end (client, buffer);
 
-                  if (auth_end >= 0)
-                    {
-                      found_auth_end = TRUE;
-                      buffer->size = auth_end;
-                      extra_data = buffer->pos - buffer->size;
-
-                      /* We may have gotten some extra data which is not part of
-                         the auth handshake, keep it for the next iteration. */
-                      if (extra_data > 0)
-                        side->extra_input_data = g_bytes_new (buffer->data + buffer->size, extra_data);
-                    }
-                  else if (auth_end == FIND_AUTH_END_ABORT)
+                  if (new_state == FIND_AUTH_END_ABORT)
                     {
                       buffer_unref (buffer);
                       if (client->proxy->log_messages)
@@ -2683,8 +2707,7 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
               got_buffer_from_side (side, buffer);
 
-              if (found_auth_end)
-                client->authenticated = TRUE;
+              client->auth_state = new_state;
             }
           else
             {
