@@ -1147,7 +1147,7 @@ header_free (Header *header)
 }
 
 static Header *
-parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset, guint32 hello_serial)
+parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset, guint32 hello_serial, GError **error)
 {
   guint32 array_len, header_len;
   guint32 offset, end_offset;
@@ -1160,17 +1160,35 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
   header->buffer = buffer_ref (buffer);
 
   if (buffer->size < 16)
-    return NULL;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Buffer too small: %"G_GSIZE_FORMAT, buffer->size);
+      return NULL;
+    }
 
   if (buffer->data[3] != 1) /* Protocol version */
-    return NULL;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Wrong protocol version: %d", buffer->data[3]);
+      return NULL;
+    }
 
   if (buffer->data[0] == 'B')
     header->big_endian = TRUE;
   else if (buffer->data[0] == 'l')
     header->big_endian = FALSE;
   else
-    return NULL;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Invalid endianess marker: %c", buffer->data[0]);
+      return NULL;
+    }
 
   header->type = buffer->data[1];
   header->flags = buffer->data[2];
@@ -1179,14 +1197,27 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
   header->serial = read_uint32 (header, &buffer->data[8]);
 
   if (header->serial == 0)
-    return NULL;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "No serial");
+      return NULL;
+    }
 
   array_len = read_uint32 (header, &buffer->data[12]);
 
   header_len = align_by_8 (12 + 4 + array_len);
   g_assert (buffer->size >= header_len); /* We should have verified this when reading in the message */
   if (header_len > buffer->size)
-    return NULL;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Header len (%d) bigger than buffer size (%"G_GSIZE_FORMAT")",
+                   header_len, buffer->size);
+      return NULL;
+    }
 
   offset = 12 + 4;
   end_offset = offset + array_len;
@@ -1195,56 +1226,132 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
     {
       offset = align_by_8 (offset); /* Structs must be 8 byte aligned */
       if (offset >= end_offset)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Struct would align past boundary");
+          return NULL;
+        }
 
       header_type = buffer->data[offset++];
       if (offset >= end_offset)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Went past boundary after parsing header_type");
+          return NULL;
+        }
 
       signature = get_signature (buffer, &offset, end_offset);
       if (signature == NULL)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Could not parse signature");
+          return NULL;
+        }
 
       switch (header_type)
         {
         case G_DBUS_MESSAGE_HEADER_FIELD_INVALID:
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Field is invalid");
           return NULL;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_PATH:
           if (strcmp (signature, "o") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for path ('%s')", signature);
+              return NULL;
+            }
           header->path = get_string (buffer, header, &offset, end_offset);
           if (header->path == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse path in path field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_INTERFACE:
           if (strcmp (signature, "s") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for interface ('%s')", signature);
+              return NULL;
+            }
           header->interface = get_string (buffer, header, &offset, end_offset);
           if (header->interface == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse interface in interface field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_MEMBER:
           if (strcmp (signature, "s") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for member ('%s')", signature);
+              return NULL;
+            }
           header->member = get_string (buffer, header, &offset, end_offset);
           if (header->member == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse member in member field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_ERROR_NAME:
           if (strcmp (signature, "s") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for error ('%s')", signature);
+              return NULL;
+            }
           header->error_name = get_string (buffer, header, &offset, end_offset);
           if (header->error_name == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse error in error field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_REPLY_SERIAL:
           if (offset + 4 > end_offset)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Header too small to fit reply serial");
+              return NULL;
+            }
 
           header->has_reply_serial = TRUE;
           reply_serial_pos = offset;
@@ -1254,31 +1361,73 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
 
         case G_DBUS_MESSAGE_HEADER_FIELD_DESTINATION:
           if (strcmp (signature, "s") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for destination ('%s')", signature);
+              return NULL;
+            }
           header->destination = get_string (buffer, header, &offset, end_offset);
           if (header->destination == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse destination in destination field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_SENDER:
           if (strcmp (signature, "s") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for sender ('%s')", signature);
+              return NULL;
+            }
           header->sender = get_string (buffer, header, &offset, end_offset);
           if (header->sender == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse sender in sender field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_SIGNATURE:
           if (strcmp (signature, "g") != 0)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Signature is invalid for signature ('%s')", signature);
+              return NULL;
+            }
           header->signature = get_signature (buffer, &offset, end_offset);
           if (header->signature == NULL)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Could not parse signature in signature field");
+              return NULL;
+            }
           break;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_NUM_UNIX_FDS:
           if (offset + 4 > end_offset)
-            return NULL;
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_INVALID_DATA,
+                           "Header too small to fit Unix FDs");
+              return NULL;
+            }
 
           header->unix_fds = read_uint32 (header, &buffer->data[offset]);
           offset += 4;
@@ -1286,6 +1435,10 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
 
         default:
           /* Unknown header field, for safety, fail parse */
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Unknown header field (%d)", header_type);
           return NULL;
         }
     }
@@ -1294,31 +1447,66 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
     {
     case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
       if (header->path == NULL || header->member == NULL)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Method call is missing path or member");
+          return NULL;
+        }
       break;
 
     case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
       if (!header->has_reply_serial)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Method return has no reply serial");
+          return NULL;
+        }
       break;
 
     case G_DBUS_MESSAGE_TYPE_ERROR:
       if (header->error_name  == NULL || !header->has_reply_serial)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Error is missing error name or reply serial");
+          return NULL;
+        }
       break;
 
     case G_DBUS_MESSAGE_TYPE_SIGNAL:
       if (header->path == NULL ||
           header->interface == NULL ||
           header->member == NULL)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Signal is missing path, interface or member");
+          return NULL;
+        }
       if (strcmp (header->path, "/org/freedesktop/DBus/Local") == 0 ||
           strcmp (header->interface, "org.freedesktop.DBus.Local") == 0)
-        return NULL;
+        {
+          g_set_error (error,
+                       G_IO_ERROR,
+                       G_IO_ERROR_INVALID_DATA,
+                       "Signal is to D-Bus Local path or interface (%s, %s)",
+                       header->path, header->interface);
+          return NULL;
+        }
       break;
 
     default:
       /* Unknown message type, for safety, fail parse */
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "Unknown message type (%d)", header->type);
       return NULL;
     }
 
@@ -2163,14 +2351,16 @@ got_buffer_from_client (FlatpakProxyClient *client, ProxySide *side, Buffer *buf
   if (client->authenticated && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
+      g_autoptr(GError) error = NULL;
       BusHandler handler;
 
       /* Filter and rewrite outgoing messages as needed */
 
-      header = parse_header (buffer, client->serial_offset, 0, 0);
+      header = parse_header (buffer, client->serial_offset, 0, 0, &error);
       if (header == NULL)
         {
-          g_warning ("Invalid message header format");
+          g_warning ("Invalid message header format from client: %s",
+                     error->message);
           side_closed (side);
           buffer_unref (buffer);
           return;
@@ -2331,16 +2521,18 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
   if (client->authenticated && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
+      g_autoptr(GError) error = NULL;
       GDBusMessage *rewritten;
       FlatpakPolicy policy;
       ExpectedReplyType expected_reply;
 
       /* Filter and rewrite incoming messages as needed */
 
-      header = parse_header (buffer, 0, client->serial_offset, client->hello_serial);
+      header = parse_header (buffer, 0, client->serial_offset, client->hello_serial, &error);
       if (header == NULL)
         {
-          g_warning ("Invalid message header format");
+          g_warning ("Invalid message header format from bus: %s",
+                     error->message);
           buffer_unref (buffer);
           side_closed (side);
           return;
