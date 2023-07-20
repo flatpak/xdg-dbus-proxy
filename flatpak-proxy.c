@@ -2271,18 +2271,18 @@ handle_hide:
 
           if (client_message_generates_reply (header))
             {
-              const char *error;
+              const char *error_str;
 
               if (client->proxy->log_messages)
                 g_print ("*HIDDEN* (ping)\n");
 
               if ((header->destination != NULL && header->destination[0] == ':') ||
                   (header->flags & G_DBUS_MESSAGE_FLAGS_NO_AUTO_START) != 0)
-                error = "org.freedesktop.DBus.Error.NameHasNoOwner";
+                error_str = "org.freedesktop.DBus.Error.NameHasNoOwner";
               else
-                error = "org.freedesktop.DBus.Error.ServiceUnknown";
+                error_str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
-              buffer = get_error_for_roundtrip (client, header, error);
+              buffer = get_error_for_roundtrip (client, header, error_str);
               expecting_reply = EXPECTED_REPLY_REWRITE;
             }
           else
