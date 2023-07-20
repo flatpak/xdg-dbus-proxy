@@ -1166,6 +1166,24 @@ header_free (Header *header)
   g_free (header);
 }
 
+static const char *
+header_debug_str (GString *s, Header *header)
+{
+  if (header->path)
+    g_string_append_printf (s, "\n\tPath: %s", header->path);
+  if (header->interface)
+    g_string_append_printf (s, "\n\tInterface: %s", header->interface);
+  if (header->member)
+    g_string_append_printf (s, "\n\tMember: %s", header->member);
+  if (header->error_name)
+    g_string_append_printf (s, "\n\tError name: %s", header->error_name);
+  if (header->destination)
+    g_string_append_printf (s, "\n\tDestination: %s", header->destination);
+  if (header->sender)
+    g_string_append_printf (s, "\n\tSender: %s", header->sender);
+  return s->str;
+}
+
 static Header *
 parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset, guint32 hello_serial, GError **error)
 {
@@ -1175,6 +1193,7 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
   guint32 reply_serial_pos = 0;
   const char *signature;
   g_autoptr(GError) str_error = NULL;
+  g_autoptr(GString) header_str = NULL;
 
   g_autoptr(Header) header = g_new0 (Header, 1);
 
@@ -1243,6 +1262,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
   offset = 12 + 4;
   end_offset = offset + array_len;
 
+  header_str = g_string_new (NULL);
+
   while (offset < end_offset)
     {
       offset = align_by_8 (offset); /* Structs must be 8 byte aligned */
@@ -1251,7 +1272,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Struct would align past boundary");
+                       "Struct would align past boundary%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
 
@@ -1261,7 +1283,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Went past boundary after parsing header_type");
+                       "Went past boundary after parsing header_type%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
 
@@ -1271,7 +1294,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Could not parse signature");
+                       "Could not parse signature%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
 
@@ -1281,7 +1305,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Field is invalid");
+                       "Field is invalid%s",
+                       header_debug_str (header_str, header));
           return NULL;
 
         case G_DBUS_MESSAGE_HEADER_FIELD_PATH:
@@ -1290,7 +1315,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for path ('%s')", signature);
+                           "Signature is invalid for path ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->path = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1299,7 +1326,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse path in path field: %s", str_error->message);
+                           "Could not parse path in path field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1310,7 +1339,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for interface ('%s')", signature);
+                           "Signature is invalid for interface ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->interface = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1319,7 +1350,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse interface in interface field: %s", str_error->message);
+                           "Could not parse interface in interface field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1330,7 +1363,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for member ('%s')", signature);
+                           "Signature is invalid for member ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->member = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1339,7 +1374,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse member in member field: %s", str_error->message);
+                           "Could not parse member in member field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1350,7 +1387,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for error ('%s')", signature);
+                           "Signature is invalid for error ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->error_name = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1359,7 +1398,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse error in error field: %s", str_error->message);
+                           "Could not parse error in error field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1370,7 +1411,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Header too small to fit reply serial");
+                           "Header too small to fit reply serial%s",
+                           header_debug_str (header_str, header));
               return NULL;
             }
 
@@ -1386,7 +1428,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for destination ('%s')", signature);
+                           "Signature is invalid for destination ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->destination = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1395,7 +1439,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse destination in destination field: %s", str_error->message);
+                           "Could not parse destination in destination field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1406,7 +1452,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for sender ('%s')", signature);
+                           "Signature is invalid for sender ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->sender = get_string (buffer, header, &offset, end_offset, &str_error);
@@ -1415,7 +1463,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse sender in sender field: %s", str_error->message);
+                           "Could not parse sender in sender field: %s%s",
+                           str_error->message,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1426,7 +1476,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Signature is invalid for signature ('%s')", signature);
+                           "Signature is invalid for signature ('%s')%s",
+                           signature,
+                           header_debug_str (header_str, header));
               return NULL;
             }
           header->signature = get_signature (buffer, &offset, end_offset);
@@ -1435,7 +1487,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse signature in signature field");
+                           "Could not parse signature in signature field%s",
+                           header_debug_str (header_str, header));
               return NULL;
             }
           break;
@@ -1446,7 +1499,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Header too small to fit Unix FDs");
+                           "Header too small to fit Unix FDs%s",
+                           header_debug_str (header_str, header));
               return NULL;
             }
 
@@ -1459,7 +1513,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Unknown header field (%d)", header_type);
+                       "Unknown header field (%d)%s",
+                       header_type,
+                       header_debug_str (header_str, header));
           return NULL;
         }
     }
@@ -1472,7 +1528,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Method call is missing path or member");
+                       "Method call is missing path or member%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
       break;
@@ -1483,7 +1540,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Method return has no reply serial");
+                       "Method return has no reply serial%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
       break;
@@ -1494,7 +1552,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Error is missing error name or reply serial");
+                       "Error is missing error name or reply serial%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
       break;
@@ -1507,7 +1566,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Signal is missing path, interface or member");
+                       "Signal is missing path, interface or member%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
       if (strcmp (header->path, "/org/freedesktop/DBus/Local") == 0 ||
@@ -1516,8 +1576,8 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
           g_set_error (error,
                        G_IO_ERROR,
                        G_IO_ERROR_INVALID_DATA,
-                       "Signal is to D-Bus Local path or interface (%s, %s)",
-                       header->path, header->interface);
+                       "Signal is to D-Bus Local path or interface%s",
+                       header_debug_str (header_str, header));
           return NULL;
         }
       break;
@@ -1527,7 +1587,9 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
       g_set_error (error,
                    G_IO_ERROR,
                    G_IO_ERROR_INVALID_DATA,
-                   "Unknown message type (%d)", header->type);
+                   "Unknown message type (%d)%s",
+                   header->type,
+                   header_debug_str (header_str, header));
       return NULL;
     }
 
