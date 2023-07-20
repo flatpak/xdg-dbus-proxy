@@ -1114,23 +1114,43 @@ get_signature (Buffer *buffer, guint32 *offset, guint32 end_offset)
 }
 
 static const char *
-get_string (Buffer *buffer, Header *header, guint32 *offset, guint32 end_offset)
+get_string (Buffer *buffer, Header *header, guint32 *offset, guint32 end_offset, GError **error)
 {
   guint8 len;
   char *str;
 
   *offset = align_by_4 (*offset);
   if (*offset + 4  >= end_offset)
-    return FALSE;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "String header would align past boundary");
+      return FALSE;
+    }
 
   len = read_uint32 (header, &buffer->data[*offset]);
   *offset += 4;
 
   if ((*offset) + len + 1 > end_offset)
-    return FALSE;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "String would align past boundary");
+      return FALSE;
+    }
 
   if (buffer->data[(*offset) + len] != 0)
-    return FALSE;
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_INVALID_DATA,
+                   "String is not nul-terminated (%.*s)",
+                   buffer->data[(*offset) + len],
+                   (char *) &buffer->data[(*offset)]);
+      return FALSE;
+    }
 
   str = (char *) &buffer->data[(*offset)];
   *offset += len + 1;
@@ -1154,6 +1174,7 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
   guint8 header_type;
   guint32 reply_serial_pos = 0;
   const char *signature;
+  g_autoptr(GError) str_error = NULL;
 
   g_autoptr(Header) header = g_new0 (Header, 1);
 
@@ -1272,13 +1293,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for path ('%s')", signature);
               return NULL;
             }
-          header->path = get_string (buffer, header, &offset, end_offset);
+          header->path = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->path == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse path in path field");
+                           "Could not parse path in path field: %s", str_error->message);
               return NULL;
             }
           break;
@@ -1292,13 +1313,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for interface ('%s')", signature);
               return NULL;
             }
-          header->interface = get_string (buffer, header, &offset, end_offset);
+          header->interface = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->interface == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse interface in interface field");
+                           "Could not parse interface in interface field: %s", str_error->message);
               return NULL;
             }
           break;
@@ -1312,13 +1333,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for member ('%s')", signature);
               return NULL;
             }
-          header->member = get_string (buffer, header, &offset, end_offset);
+          header->member = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->member == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse member in member field");
+                           "Could not parse member in member field: %s", str_error->message);
               return NULL;
             }
           break;
@@ -1332,13 +1353,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for error ('%s')", signature);
               return NULL;
             }
-          header->error_name = get_string (buffer, header, &offset, end_offset);
+          header->error_name = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->error_name == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse error in error field");
+                           "Could not parse error in error field: %s", str_error->message);
               return NULL;
             }
           break;
@@ -1368,13 +1389,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for destination ('%s')", signature);
               return NULL;
             }
-          header->destination = get_string (buffer, header, &offset, end_offset);
+          header->destination = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->destination == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse destination in destination field");
+                           "Could not parse destination in destination field: %s", str_error->message);
               return NULL;
             }
           break;
@@ -1388,13 +1409,13 @@ parse_header (Buffer *buffer, guint32 serial_offset, guint32 reply_serial_offset
                            "Signature is invalid for sender ('%s')", signature);
               return NULL;
             }
-          header->sender = get_string (buffer, header, &offset, end_offset);
+          header->sender = get_string (buffer, header, &offset, end_offset, &str_error);
           if (header->sender == NULL)
             {
               g_set_error (error,
                            G_IO_ERROR,
                            G_IO_ERROR_INVALID_DATA,
-                           "Could not parse sender in sender field");
+                           "Could not parse sender in sender field: %s", str_error->message);
               return NULL;
             }
           break;
