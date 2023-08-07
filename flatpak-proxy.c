@@ -1116,7 +1116,7 @@ get_signature (Buffer *buffer, guint32 *offset, guint32 end_offset)
 static const char *
 get_string (Buffer *buffer, Header *header, guint32 *offset, guint32 end_offset)
 {
-  guint8 len;
+  guint32 len;
   char *str;
 
   *offset = align_by_4 (*offset);
