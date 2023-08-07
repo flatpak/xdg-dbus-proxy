@@ -1,3 +1,12 @@
+Changes in 0.1.5
+================
+
+Released 2023-08-07
+
+  * Fix handling of object paths > 255 bytes
+  * Print better errors when message parsing fails
+  * Optionally install tests for "as-installed" testing
+
 Changes in 0.1.4
 ================
 
