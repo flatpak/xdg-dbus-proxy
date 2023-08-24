@@ -2,7 +2,7 @@ option(
   'installed_tests',
   type : 'boolean',
   description : 'Build and install "as-installed" tests',
-  value : 'false',
+  value : false,
 )
 option(
   'man',
@@ -20,5 +20,5 @@ option(
   'tests',
   type : 'boolean',
   description : 'Build and run automated tests',
-  value : 'true',
+  value : true,
 )
