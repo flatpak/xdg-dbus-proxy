@@ -304,6 +304,7 @@ struct FlatpakProxyClient
   AuthState     auth_state;
   /* Only set if auth_state == AUTH_WAITING_FOR_BACKLOG */
   gsize         auth_server_backlog;
+  gsize         auth_server_replies;
   GByteArray   *auth_buffer;
 
   ProxySide     client_side;
@@ -2592,6 +2593,20 @@ handle_deny:
 }
 
 static void
+check_pending_auth_lines (FlatpakProxyClient *client)
+{
+  if (client->auth_server_replies == client->auth_server_backlog)
+    {
+      client->auth_state = AUTH_COMPLETE;
+    }
+  else if (client->auth_server_replies > client->auth_server_backlog)
+    {
+      /* This should really never happen */
+      g_warning ("Received more auth replies than lines sent");
+    }
+}
+
+static void
 got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer)
 {
   if (client->auth_state == AUTH_COMPLETE && client->proxy->filter)
@@ -2882,7 +2897,8 @@ find_auth_end (FlatpakProxyClient *client, Buffer *buffer)
         }
       else
         {
-          /* No end-of-line in this buffer */
+          /* No more end-of-line in this buffer */
+          client->auth_server_backlog = lines_skipped;
           g_byte_array_remove_range (client->auth_buffer, 0, offset);
 
           /* Abort if more than 16k before newline, similar to what dbus-daemon does */
@@ -2963,9 +2979,10 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
               got_buffer_from_side (side, buffer);
 
               if (found_auth_end)
-                client->auth_state = client->auth_server_backlog
-                  ? AUTH_WAITING_FOR_BACKLOG
-                  : AUTH_COMPLETE;
+                {
+                  client->auth_state = AUTH_WAITING_FOR_BACKLOG;
+                  check_pending_auth_lines (client);
+                }
             }
           else
             {
@@ -2986,7 +3003,8 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                     {
                       line_start = line_end + strlen (AUTH_LINE_SENTINEL);
 
-                      if (--client->auth_server_backlog == 0)
+                      client->auth_server_replies++;
+                      if (client->auth_server_replies == client->auth_server_backlog)
                         {
                           buffer->size = line_start - buffer->data;
                           extra_data = buffer->pos - buffer->size;
@@ -3003,8 +3021,7 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
               got_buffer_from_side (side, buffer);
 
-              if (client->auth_server_backlog == 0)
-                client->auth_state = AUTH_COMPLETE;
+              check_pending_auth_lines (client);
             }
           else
             {
