@@ -2071,31 +2071,28 @@ policy_from_handler (BusHandler handler)
 static char *
 get_arg0_string (Buffer *buffer)
 {
-  GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body;
-
   g_autoptr(GVariant) arg0 = NULL;
-  char *name = NULL;
 
   if (message != NULL &&
       (body = g_dbus_message_get_body (message)) != NULL &&
       (arg0 = g_variant_get_child_value (body, 0)) != NULL &&
       g_variant_is_of_type (arg0, G_VARIANT_TYPE_STRING))
-    name = g_variant_dup_string (arg0, NULL);
+    return g_variant_dup_string (arg0, NULL);
 
-  g_object_unref (message);
-
-  return name;
+  return NULL;
 }
 
 static gboolean
 validate_arg0_match (FlatpakProxyClient *client, Buffer *buffer)
 {
-  GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body;
   g_autoptr(GVariant) arg0 = NULL;
   const char *match;
-  gboolean res = TRUE;
 
   if (message != NULL &&
       (body = g_dbus_message_get_body (message)) != NULL &&
@@ -2104,22 +2101,21 @@ validate_arg0_match (FlatpakProxyClient *client, Buffer *buffer)
     {
       match = g_variant_get_string (arg0, NULL);
       if (strstr (match, "eavesdrop=") != NULL)
-        res = FALSE;
+        return FALSE;
     }
 
-  g_object_unref (message);
-  return res;
+  return TRUE;
 }
 
 static gboolean
 validate_arg0_name (FlatpakProxyClient *client, Buffer *buffer, FlatpakPolicy required_policy, FlatpakPolicy *has_policy)
 {
-  GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body;
   g_autoptr(GVariant) arg0 = NULL;
   const char *name;
   FlatpakPolicy name_policy;
-  gboolean res = FALSE;
 
   if (has_policy)
     *has_policy = FLATPAK_POLICY_NONE;
@@ -2136,19 +2132,20 @@ validate_arg0_name (FlatpakProxyClient *client, Buffer *buffer, FlatpakPolicy re
         *has_policy = name_policy;
 
       if (name_policy >= required_policy)
-        res = TRUE;
-      else if (client->proxy->log_messages)
+        return TRUE;
+
+      if (client->proxy->log_messages)
         g_print ("Filtering message due to arg0 %s, policy: %d (required %d)\n", name, name_policy, required_policy);
     }
 
-  g_object_unref (message);
-  return res;
+  return FALSE;
 }
 
 static Buffer *
 filter_names_list (FlatpakProxyClient *client, Buffer *buffer)
 {
-  GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body, *new_names;
   g_autoptr(GVariant) arg0 = NULL;
   const gchar **names;
@@ -2177,7 +2174,6 @@ filter_names_list (FlatpakProxyClient *client, Buffer *buffer)
                            g_variant_new_tuple (&new_names, 1));
 
   filtered = message_to_buffer (message);
-  g_object_unref (message);
   return filtered;
 }
 
@@ -2195,13 +2191,13 @@ message_is_name_owner_changed (FlatpakProxyClient *client, Header *header)
 static gboolean
 should_filter_name_owner_changed (FlatpakProxyClient *client, Buffer *buffer)
 {
-  GDBusMessage *message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body;
   g_autoptr(GVariant) arg0 = NULL;
   g_autoptr(GVariant) arg1 = NULL;
   g_autoptr(GVariant) arg2 = NULL;
   const gchar *name, *new;
-  gboolean filter = TRUE;
 
   if (message == NULL ||
       (body = g_dbus_message_get_body (message)) == NULL ||
@@ -2225,12 +2221,10 @@ should_filter_name_owner_changed (FlatpakProxyClient *client, Buffer *buffer)
             flatpak_proxy_client_add_unique_id_owned_name (client, new, name);
         }
 
-      filter = FALSE;
+      return FALSE;
     }
 
-  g_object_unref (message);
-
-  return filter;
+  return TRUE;
 }
 
 static GList *
@@ -2394,42 +2388,41 @@ queue_initial_name_ops (FlatpakProxyClient *client)
 static void
 queue_wildcard_initial_name_ops (FlatpakProxyClient *client, Header *header, Buffer *buffer)
 {
-  GDBusMessage *decoded_message = g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
+  g_autoptr(GDBusMessage) decoded_message =
+    g_dbus_message_new_from_blob (buffer->data, buffer->size, 0, NULL);
   GVariant *body;
   g_autoptr(GVariant) arg0 = NULL;
+  g_autofree const gchar **names = NULL;
+  int i;
 
-  if (decoded_message != NULL &&
-      header->type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN &&
-      (body = g_dbus_message_get_body (decoded_message)) != NULL &&
-      (arg0 = g_variant_get_child_value (body, 0)) != NULL &&
-      g_variant_is_of_type (arg0, G_VARIANT_TYPE_STRING_ARRAY))
+  if (decoded_message == NULL ||
+      header->type != G_DBUS_MESSAGE_TYPE_METHOD_RETURN ||
+      (body = g_dbus_message_get_body (decoded_message)) == NULL ||
+      (arg0 = g_variant_get_child_value (body, 0)) == NULL ||
+      !g_variant_is_of_type (arg0, G_VARIANT_TYPE_STRING_ARRAY))
+    return;
+
+  names = g_variant_get_strv (arg0, NULL);
+
+  /* Loop over all current names and get the owner for all the ones that match our rules
+     policies so that we can update the unique id policies for those */
+  for (i = 0; names[i] != NULL; i++)
     {
-      const gchar **names = g_variant_get_strv (arg0, NULL);
-      int i;
+      const char *name = names[i];
 
-      /* Loop over all current names and get the owner for all the ones that match our rules
-         policies so that we can update the unique id policies for those */
-      for (i = 0; names[i] != NULL; i++)
+      if (name[0] != ':' &&
+          flatpak_proxy_client_get_max_policy (client, name) != FLATPAK_POLICY_NONE)
         {
-          const char *name = names[i];
+          /* Get the current owner of the name (if any) so we can apply policy to it */
+          GDBusMessage *message = g_dbus_message_new_method_call ("org.freedesktop.DBus", "/", "org.freedesktop.DBus", "GetNameOwner");
+          g_dbus_message_set_body (message, g_variant_new ("(s)", name));
+          queue_fake_message (client, message, EXPECTED_REPLY_FAKE_GET_NAME_OWNER);
+          g_hash_table_replace (client->get_owner_reply, GINT_TO_POINTER (client->last_serial), g_strdup (name));
 
-          if (name[0] != ':' &&
-              flatpak_proxy_client_get_max_policy (client, name) != FLATPAK_POLICY_NONE)
-            {
-              /* Get the current owner of the name (if any) so we can apply policy to it */
-              GDBusMessage *message = g_dbus_message_new_method_call ("org.freedesktop.DBus", "/", "org.freedesktop.DBus", "GetNameOwner");
-              g_dbus_message_set_body (message, g_variant_new ("(s)", name));
-              queue_fake_message (client, message, EXPECTED_REPLY_FAKE_GET_NAME_OWNER);
-              g_hash_table_replace (client->get_owner_reply, GINT_TO_POINTER (client->last_serial), g_strdup (name));
-
-              if (client->proxy->log_messages)
-                g_print ("C%d: -> org.freedesktop.DBus fake GetNameOwner for %s\n", client->last_serial, name);
-            }
+          if (client->proxy->log_messages)
+            g_print ("C%d: -> org.freedesktop.DBus fake GetNameOwner for %s\n", client->last_serial, name);
         }
-      g_free (names);
     }
-
-  g_object_unref (decoded_message);
 }
 
 
