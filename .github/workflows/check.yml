@@ -22,7 +22,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           autoconf \
@@ -87,7 +86,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           dbus \
@@ -158,7 +156,7 @@ jobs:
     steps:
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v1
+      uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
         # If you wish to specify custom queries, you can do so here or in a config file.
@@ -167,8 +165,6 @@ jobs:
         # queries: ./path/to/local/query, your-org/your-repo/queries@main
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
-        sudo apt-get update
         sudo apt-get update
         sudo apt-get install -y \
           autoconf \
@@ -201,7 +197,7 @@ jobs:
     - name: Build xdg-dbus-proxy
       run: make -j $(getconf _NPROCESSORS_ONLN) V=1
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v1
+      uses: github/codeql-action/analyze@v3
     - name: Run tests
       run: make -j $(getconf _NPROCESSORS_ONLN) check VERBOSE=1
     - name: Collect overall test logs on failure
@@ -224,7 +220,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           autoconf \
