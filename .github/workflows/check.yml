@@ -22,7 +22,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           autoconf \
@@ -87,7 +86,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           dbus \
@@ -167,7 +165,6 @@ jobs:
         # queries: ./path/to/local/query, your-org/your-repo/queries@main
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get update
         sudo apt-get install -y \
@@ -224,7 +221,6 @@ jobs:
     steps:
     - name: Install Dependencies
       run: |
-        sudo add-apt-repository 'deb https://download.mono-project.com/repo/ubuntu stable-bionic main' # Needed for updates to work
         sudo apt-get update
         sudo apt-get install -y \
           autoconf \
