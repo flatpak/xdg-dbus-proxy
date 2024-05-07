@@ -127,9 +127,9 @@
  * reply_serials, i.e. that a reply can only be sent once and by the real
  * recipient of an previously sent method call.
  *
- * Serial numbers with high-bit=1 are reserved for messages created by the
+ * Serial numbers larger than MAX_CLIENT_SERIAL reserved for messages created by the
  * proxy itself (fake messages). This limits the possible values of serials
- * available to the client to half of the usual maximum value. Versions
+ * available to the client to the value of MAX_CLIENT_SERIAL. Versions
  * older than 0.1.6 required monotonically increasing serials instead. This
  * mechanism was dropped since it caused regular issues with multiple D-Bus
  * clients.
@@ -195,7 +195,8 @@ typedef struct FlatpakProxyClient FlatpakProxyClient;
 #define AUTH_LINE_SENTINEL "\r\n"
 #define AUTH_BEGIN "BEGIN"
 
-#define MAX_CLIENT_SERIAL (G_MAXUINT32 / 2)
+// Use a relatively hight number since there are not a lot of fake requests we need to do
+#define MAX_CLIENT_SERIAL (G_MAXUINT32 - 65536)
 
 typedef enum {
   EXPECTED_REPLY_NONE,
