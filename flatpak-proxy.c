@@ -138,8 +138,8 @@
  * connection after the initial Hello message, sending AddMatch,
  * ListNames and GetNameOwner messages to get a proper view of who
  * owns the names atm. Then we listen to NameOwnerChanged events for
- * further updates. This causes a slight offset between serials in the
- * client and serials as seen by the bus.
+ * further updates. This causes some serials abow MAX_CLIENT_SERIAL to be
+ * used for "fake messages".
  *
  * After that the filter is strictly passive, in that we never
  * construct our own requests. For each message received from the
