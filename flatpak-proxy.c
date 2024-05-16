@@ -221,8 +221,13 @@ typedef enum {
 
 typedef struct
 {
+  /* Total size (capacity) of the buffer */
   gsize    size;
+  /* Offset to the first writable position (the buffer is full when pos ==
+   * size) */
   gsize    pos;
+  /* Offset to the first byte that hasn't been sent yet */
+  gsize    sent;
   int      refcount;
   gboolean send_credentials;
   GList   *control_messages;
@@ -786,6 +791,7 @@ buffer_new (gsize size, Buffer *old)
   if (old)
     {
       buffer->pos = old->pos;
+      buffer->sent = old->sent;
       /* Takes ownership of any old control messages */
       buffer->control_messages = old->control_messages;
       old->control_messages = NULL;
@@ -850,13 +856,18 @@ buffer_read (ProxySide *side,
              Buffer    *buffer,
              GSocket   *socket)
 {
-  gsize received;
+  FlatpakProxyClient *client = side->client;
+  gsize received = 0;
   GInputVector v;
   GError *error = NULL;
   GSocketControlMessage **messages;
   int num_messages, i;
 
-  if (side->extra_input_data)
+  if (client->auth_state == AUTH_WAITING_FOR_BACKLOG &&
+      side == &client->client_side)
+    return FALSE;
+
+  if (side->extra_input_data && client->auth_state == AUTH_COMPLETE)
     {
       gsize extra_size;
       const guchar *extra_bytes = g_bytes_get_data (side->extra_input_data, &extra_size);
@@ -878,7 +889,7 @@ buffer_read (ProxySide *side,
           g_clear_pointer (&side->extra_input_data, g_bytes_unref);
         }
     }
-  else
+  else if (!side->extra_input_data)
     {
       gssize res;
       int flags = 0;
@@ -954,7 +965,7 @@ buffer_write (ProxySide *side,
           return FALSE;
         }
 
-      buffer->pos = 1;
+      buffer->sent = 1;
       return TRUE;
     }
 
@@ -963,8 +974,8 @@ buffer_write (ProxySide *side,
   for (l = buffer->control_messages, i = 0; l != NULL; l = l->next, i++)
     messages[i] = l->data;
 
-  v.buffer = &buffer->data[buffer->pos];
-  v.size = buffer->size - buffer->pos;
+  v.buffer = &buffer->data[buffer->sent];
+  v.size = buffer->pos - buffer->sent;
 
   res = g_socket_send_message (socket, NULL, &v, 1,
                                messages, n_messages,
@@ -991,16 +1002,15 @@ buffer_write (ProxySide *side,
   g_list_free_full (buffer->control_messages, g_object_unref);
   buffer->control_messages = NULL;
 
-  buffer->pos += res;
+  buffer->sent += res;
   return TRUE;
 }
 
 static gboolean
-side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
+send_outgoing_buffers (GSocket *socket, ProxySide *side)
 {
-  ProxySide *side = user_data;
   FlatpakProxyClient *client = side->client;
-  gboolean retval = G_SOURCE_CONTINUE;
+  gboolean all_done = FALSE;
 
   g_object_ref (client);
 
@@ -1010,7 +1020,7 @@ side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
       if (buffer_write (side, buffer, socket))
         {
-          if (buffer->pos == buffer->size)
+          if (buffer->sent == buffer->pos)
             {
               side->buffers = g_list_delete_link (side->buffers, side->buffers);
               buffer_unref (buffer);
@@ -1026,8 +1036,7 @@ side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
     {
       ProxySide *other_side = get_other_side (side);
 
-      side->out_source = NULL;
-      retval = G_SOURCE_REMOVE;
+      all_done = TRUE;
 
       if (other_side->closed)
         side_closed (side);
@@ -1035,7 +1044,24 @@ side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
   g_object_unref (client);
 
-  return retval;
+  return all_done;
+}
+
+static gboolean
+side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
+{
+  ProxySide *side = user_data;
+
+  gboolean all_done = send_outgoing_buffers (socket, side);
+  if (all_done)
+    {
+      side->out_source = NULL;
+      return G_SOURCE_REMOVE;
+    }
+  else
+    {
+      return G_SOURCE_CONTINUE;
+    }
 }
 
 static void
@@ -1074,7 +1100,6 @@ queue_outgoing_buffer (ProxySide *side, Buffer *buffer)
       g_source_unref (side->out_source);
     }
 
-  buffer->pos = 0;
   side->buffers = g_list_append (side->buffers, buffer);
 }
 
@@ -1834,6 +1859,7 @@ message_to_buffer (GDBusMessage *message)
   blob = g_dbus_message_to_blob (message, &blob_size, G_DBUS_CAPABILITY_FLAGS_NONE, NULL);
   buffer = buffer_new (blob_size, NULL);
   memcpy (buffer->data, blob, blob_size);
+  buffer->pos = blob_size;
   g_free (blob);
 
   return buffer;
@@ -2944,7 +2970,6 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
               gboolean found_auth_end = FALSE;
               gsize extra_data;
 
-              buffer->size = buffer->pos;
               if (!side->got_first_byte)
                 {
                   buffer->send_credentials = TRUE;
@@ -2958,8 +2983,8 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                   if (auth_end >= 0)
                     {
                       found_auth_end = TRUE;
-                      buffer->size = auth_end;
-                      extra_data = buffer->pos - buffer->size;
+                      extra_data = buffer->pos - auth_end;
+                      buffer->size = buffer->pos = auth_end;
 
                       /* We may have gotten some extra data which is not part of
                          the auth handshake, keep it for the next iteration. */
@@ -2980,6 +3005,11 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
               if (found_auth_end)
                 {
+                  /* Immediately send the outgoing buffer */
+                  GSocketConnection *connection = client->bus_side.connection;
+                  GSocket *bus_socket = g_socket_connection_get_socket (connection);
+                  send_outgoing_buffers (bus_socket, &client->bus_side);
+
                   client->auth_state = AUTH_WAITING_FOR_BACKLOG;
                   check_pending_auth_lines (client);
                 }
