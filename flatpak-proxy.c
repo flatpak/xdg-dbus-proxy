@@ -2744,11 +2744,11 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
           policy = flatpak_proxy_client_get_max_policy_and_matched (client, header->sender, &filters);
 
           if (policy == FLATPAK_POLICY_OWN ||
-              (policy == FLATPAK_POLICY_TALK &&
-               any_filter_matches (filters, FILTER_TYPE_BROADCAST,
-                                   header->path,
-                                   header->interface,
-                                   header->member)))
+              policy == FLATPAK_POLICY_TALK ||
+              any_filter_matches (filters, FILTER_TYPE_BROADCAST,
+                                  header->path,
+                                  header->interface,
+                                  header->member))
             filtered = FALSE;
 
           if (filtered)
