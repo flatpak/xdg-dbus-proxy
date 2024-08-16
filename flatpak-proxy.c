@@ -2939,7 +2939,7 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
       if (!side->got_first_byte)
         buffer = buffer_new (1, NULL);
       else if (client->auth_state != AUTH_COMPLETE)
-        buffer = buffer_new (64, NULL);
+        buffer = buffer_new (256, NULL);
       else
         buffer = side->current_read_buffer;
 
