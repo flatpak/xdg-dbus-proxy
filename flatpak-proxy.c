@@ -2952,109 +2952,107 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
 
       if (client->auth_state != AUTH_COMPLETE)
         {
-          if (buffer->pos > 0)
+          if (buffer->pos == 0)
             {
-              /* The state of the client after handling this buffer */
-              AuthState new_auth_state = client->auth_state;
+              buffer_unref (buffer);
+              continue;
+            }
 
-              buffer->size = buffer->pos;
-              if (!side->got_first_byte)
+          /* The state of the client after handling this buffer */
+          AuthState new_auth_state = client->auth_state;
+
+          buffer->size = buffer->pos;
+          if (!side->got_first_byte)
+            {
+              buffer->send_credentials = TRUE;
+              side->got_first_byte = TRUE;
+            }
+          /* Look for end of authentication mechanism */
+          else if (side == &client->client_side && client->auth_state == AUTH_WAITING_FOR_BEGIN)
+            {
+              gsize lines_skipped = 0;
+              gssize auth_end = find_auth_end (client, buffer, &lines_skipped);
+
+              client->auth_requests += lines_skipped;
+
+              if (auth_end >= 0)
                 {
-                  buffer->send_credentials = TRUE;
-                  side->got_first_byte = TRUE;
+                  gsize extra_data;
+
+                  if (client->auth_replies == client->auth_requests)
+                    new_auth_state = AUTH_COMPLETE;
+                  else
+                    new_auth_state = AUTH_WAITING_FOR_BACKLOG;
+
+                  extra_data = buffer->pos - auth_end;
+                  buffer->size = buffer->pos = auth_end;
+
+                  /* We may have gotten some extra data which is not part of
+                     the auth handshake, keep it for the next iteration. */
+                  if (extra_data > 0)
+                    side->extra_input_data = g_bytes_new (buffer->data + buffer->size, extra_data);
                 }
-              /* Look for end of authentication mechanism */
-              else if (side == &client->client_side && client->auth_state == AUTH_WAITING_FOR_BEGIN)
+              else if (auth_end == FIND_AUTH_END_ABORT)
                 {
-                  gsize lines_skipped = 0;
-                  gssize auth_end = find_auth_end (client, buffer, &lines_skipped);
+                  buffer_unref (buffer);
+                  if (client->proxy->log_messages)
+                    g_print ("Invalid AUTH line, aborting\n");
+                  side_closed (side);
+                  break;
+                }
+            }
+          else if (side == &client->bus_side)
+            {
+              gsize remaining = buffer->pos;
+              guint8 *line_start = buffer->data;
 
-                  client->auth_requests += lines_skipped;
+              while (remaining > 0)
+                {
+                  guint8 *line_end = NULL;
 
-                  if (auth_end >= 0)
-                    {
-                      gsize extra_data;
-
-                      if (client->auth_replies == client->auth_requests)
-                        new_auth_state = AUTH_COMPLETE;
-                      else
-                        new_auth_state = AUTH_WAITING_FOR_BACKLOG;
-
-                      extra_data = buffer->pos - auth_end;
-                      buffer->size = buffer->pos = auth_end;
-
-                      /* We may have gotten some extra data which is not part of
-                         the auth handshake, keep it for the next iteration. */
-                      if (extra_data > 0)
-                        side->extra_input_data = g_bytes_new (buffer->data + buffer->size, extra_data);
-                    }
-                  else if (auth_end == FIND_AUTH_END_ABORT)
+                  if (client->auth_replies == client->auth_requests)
                     {
                       buffer_unref (buffer);
                       if (client->proxy->log_messages)
-                        g_print ("Invalid AUTH line, aborting\n");
+                        g_print ("Unexpected auth reply line from bus, aborting\n");
                       side_closed (side);
                       break;
                     }
-                }
-              else if (side == &client->bus_side)
-                {
-                  gsize remaining = buffer->pos;
-                  guint8 *line_start = buffer->data;
 
-                  while (remaining > 0)
+                  line_end = find_auth_line_end (line_start, remaining);
+                  if (line_end == NULL)
+                    line_end = line_start + remaining;
+                  else
                     {
-                      guint8 *line_end = NULL;
+                      line_end += strlen (AUTH_LINE_SENTINEL);
+                      client->auth_replies++;
+                    }
 
-                      if (client->auth_replies == client->auth_requests)
-                        {
-                          buffer_unref (buffer);
-                          if (client->proxy->log_messages)
-                            g_print ("Unexpected auth reply line from bus, aborting\n");
-                          side_closed (side);
-                          break;
-                        }
+                  remaining -= line_end - line_start;
+                  line_start = line_end;
 
-                      line_end = find_auth_line_end (line_start, remaining);
-                      if (line_end == NULL)
-                        line_end = line_start + remaining;
-                      else
-                        {
-                          line_end += strlen (AUTH_LINE_SENTINEL);
-                          client->auth_replies++;
-                        }
+                  if (client->auth_state == AUTH_WAITING_FOR_BACKLOG &&
+                      client->auth_replies == client->auth_requests)
+                    {
+                      new_auth_state = AUTH_COMPLETE;
+                      /* We may have added extra data on the input, ensure we read it directly */
+                      wake_client_reader = TRUE;
 
-                      remaining -= line_end - line_start;
-                      line_start = line_end;
+                      buffer->pos = buffer->size = line_start - buffer->data;
 
+                      /* We may have gotten some extra data which is not part of
+                         the auth handshake, keep it for the next iteration. */
+                      if (remaining > 0)
+                        side->extra_input_data = g_bytes_new (line_start, remaining);
 
-                      if (client->auth_state == AUTH_WAITING_FOR_BACKLOG &&
-                          client->auth_replies == client->auth_requests)
-                        {
-                          new_auth_state = AUTH_COMPLETE;
-                          /* We may have added extra data on the input, ensure we read it directly */
-                          wake_client_reader = TRUE;
-
-                          buffer->pos = buffer->size = line_start - buffer->data;
-
-                          /* We may have gotten some extra data which is not part of
-                            the auth handshake, keep it for the next iteration. */
-                          if (remaining > 0)
-                            side->extra_input_data = g_bytes_new (line_start, remaining);
-
-                          break;
-                        }
+                      break;
                     }
                 }
-
-              got_buffer_from_side (side, buffer);
-
-              client->auth_state = new_auth_state;
             }
-          else
-            {
-              buffer_unref (buffer);
-            }
+
+          got_buffer_from_side (side, buffer);
+
+          client->auth_state = new_auth_state;
         }
       else if (buffer->pos == buffer->size)
         {
