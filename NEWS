@@ -1,3 +1,14 @@
+Changes in 0.1.6
+================
+
+Released 2024-08-22
+
+  * Use lower serial bits to differentiate proxy / client serials, and handle
+    non-monotonically increasing serials better.
+  * Fix various GVariant reference leaks
+  * Don't require talk permission for broadcast rules
+  * Support sdbus clients
+
 Changes in 0.1.5
 ================
 
