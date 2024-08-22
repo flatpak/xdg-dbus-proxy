@@ -39,7 +39,7 @@ jobs:
       run: mkdir test-logs
     - name: configure
       run: |
-        meson _build
+        meson setup . _build
     - name: Build xdg-dbus-proxy
       run: ninja -C _build -v
     - name: Run tests
@@ -65,7 +65,7 @@ jobs:
         mkdir tests/use-as-subproject/subprojects
         tar -C tests/use-as-subproject/subprojects -xf _build/meson-dist/xdg-dbus-proxy-*.tar.xz
         mv tests/use-as-subproject/subprojects/xdg-dbus-proxy-* tests/use-as-subproject/subprojects/dbus-proxy
-        ( cd tests/use-as-subproject && meson _build )
+        ( cd tests/use-as-subproject && meson setup . _build )
         ninja -C tests/use-as-subproject/_build -v
         meson test -C tests/use-as-subproject/_build
         DESTDIR="$(pwd)/DESTDIR-as-subproject" meson install -C tests/use-as-subproject/_build
@@ -120,7 +120,7 @@ jobs:
       run: mkdir test-logs
     - name: configure
       run: |
-        meson _build -Db_sanitize=address,undefined
+        meson setup . _build -Db_sanitize=address,undefined
       env:
         CC: clang
     - name: Build xdg-dbus-proxy
@@ -169,7 +169,7 @@ jobs:
       run: mkdir test-logs
     - name: configure
       run: |
-        meson _build
+        meson setup . _build
       env:
         CFLAGS: >-
           -O2
