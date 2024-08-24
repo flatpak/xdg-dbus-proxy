@@ -1963,11 +1963,27 @@ is_dbus_method_call (Header *header)
 }
 
 static gboolean
-is_introspection_call (Header *header)
+is_properties_call (Header *header)
 {
   return
     header->type == G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
-    g_strcmp0 (header->interface, "org.freedesktop.DBus.Introspectable") == 0;
+    g_strcmp0 (header->interface, "org.freedesktop.DBus.Properties") == 0;
+}
+
+static gboolean
+is_introspection_call (Header *header)
+{
+  return
+  header->type == G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
+  g_strcmp0 (header->interface, "org.freedesktop.DBus.Introspectable") == 0;
+}
+
+static gboolean
+is_peer_call (Header *header)
+{
+  return
+  header->type == G_DBUS_MESSAGE_TYPE_METHOD_CALL &&
+  g_strcmp0 (header->interface, "org.freedesktop.DBus.Peer") == 0;
 }
 
 static BusHandler
@@ -2009,7 +2025,7 @@ get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
 
   /* Its a bus call */
 
-  if (is_introspection_call (header))
+  if (is_properties_call (header) || is_introspection_call (header) || is_peer_call (header))
     {
       return HANDLE_PASS;
     }
