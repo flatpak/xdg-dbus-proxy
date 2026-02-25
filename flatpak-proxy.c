@@ -3064,6 +3064,7 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                 {
                   g_warning ("Invalid message header read");
                   side_closed (side);
+                  continue;
                 }
               else
                 {
