@@ -133,7 +133,7 @@ add_args (GBytes    *bytes,
 {
   gsize data_len, remainder_len;
   const guchar *data = g_bytes_get_data (bytes, &data_len);
-  guchar *s;
+  const guchar *s;
   const guchar *remainder;
 
   remainder = data;
