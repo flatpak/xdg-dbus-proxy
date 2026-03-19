@@ -31,7 +31,7 @@
 <cmdsynopsis>
 <command>xdg-dbus-proxy</command>
 <arg choice="opt" rep="repeat"><replaceable>OPTION</replaceable></arg>
-<arg choice="opt" rep="repeat"><replaceable>ADDRESS</replaceable> <replaceable>PATH</replaceable>
+<arg choice="opt" rep="repeat"><replaceable>ADDRESS</replaceable> <group choice="req"><replaceable>PATH</replaceable><arg choice="plain">fd:<replaceable>FD</replaceable></arg></group>
     <arg choice="opt" rep="repeat"><replaceable>OPTION</replaceable></arg>
 </arg>
 </cmdsynopsis>
@@ -45,7 +45,8 @@
 </para>
 <refsect2><title>Basic Operation</title>
 <para>
-  The proxy listens to the unix domain socket at <replaceable>PATH</replaceable>,
+  The proxy listens to the unix domain socket at <replaceable>PATH</replaceable>
+  (or on the pre-existing socket passed via <literal>fd:<replaceable>FD</replaceable></literal>),
   and for each client that connects to the socket, it opens up a new connection to
   the specified D-Bus <replaceable>ADDRESS</replaceable> (typically the session bus)
   and forwards data between the two. During the authentication phase all data is
@@ -213,6 +214,12 @@
 <refsect1><title>Examples</title>
 <para>
   <command>$ xdg-dbus-proxy --fd=26 unix:path=/run/usr/1000/bus /run/usr/1000/.dbus-proxy/session-bus-proxy --filter --own=org.gnome.ghex.* --talk=ca.desrt.dconf --call=org.freedesktop.portal.*=* --broadcast=org.freedesktop.portal.*=@/org/freedesktop/portal/*</command>
+</para>
+<para>
+  Using a pre-existing socket file descriptor (e.g. from systemd socket activation):
+</para>
+<para>
+  <command>$ xdg-dbus-proxy unix:path=/run/dbus/system_bus_socket fd:3 --filter --talk=org.freedesktop.NetworkManager</command>
 </para>
 </refsect1>
 
