@@ -49,7 +49,7 @@ static void usage (int ecode, FILE *out) G_GNUC_NORETURN;
 static void
 usage (int ecode, FILE *out)
 {
-  fprintf (out, "usage: %s [OPTIONS...] [ADDRESS PATH [OPTIONS...] ...]\n\n", argv0);
+  fprintf (out, "usage: %s [OPTIONS...] [ADDRESS (PATH|fd:FD) [OPTIONS...] ...]\n\n", argv0);
 
   fprintf (out,
            "Options:\n"
@@ -232,6 +232,8 @@ start_proxy (GPtrArray *args, guint *args_i)
   g_autoptr(GError) error = NULL;
   const char *bus_address, *socket_path;
   const char *arg;
+  int socket_fd = -1;
+  int n = 0;
 
   if (*args_i >= args->len || ((char *) g_ptr_array_index (args, *args_i))[0] == '-')
     {
@@ -251,7 +253,21 @@ start_proxy (GPtrArray *args, guint *args_i)
   socket_path = g_ptr_array_index (args, *args_i);
   *args_i += 1;
 
-  proxy = flatpak_proxy_new (bus_address, socket_path);
+  if (g_str_has_prefix (socket_path, "fd:"))
+    {
+      if (sscanf (socket_path, "fd:%d%n", &socket_fd, &n) != 1 || 
+          socket_path[n] != '\0' ||
+          socket_fd < 3)
+        {
+          g_printerr ("Invalid fd: '%s'\n", socket_path);
+          return FALSE;
+        }
+      proxy = flatpak_proxy_new_from_fd (bus_address, socket_fd);
+    }
+  else
+    {
+      proxy = flatpak_proxy_new_from_path (bus_address, socket_path);
+    }
 
   while (*args_i < args->len)
     {
