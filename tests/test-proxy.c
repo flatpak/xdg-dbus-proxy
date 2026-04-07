@@ -21,6 +21,8 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <glib.h>
@@ -45,12 +47,17 @@ typedef struct
   gchar *proxy_address;
   const gchar *proxy_path;
   int sync_pipe;
+  int listen_fd;
 } Fixture;
 
 typedef struct
 {
   int dummy;
 } Config;
+
+typedef struct {
+  gboolean use_fd_arg;
+} TestParams;
 
 static void
 setup (Fixture *f,
@@ -62,6 +69,7 @@ setup (Fixture *f,
   gchar address_buffer[4096] = { 0 };
   g_autofree gchar *escaped = NULL;
   char *newline;
+  struct sockaddr_un addr;
 
   f->sync_pipe = -1;
 
@@ -112,6 +120,16 @@ setup (Fixture *f,
   f->proxy_socket = g_build_filename (f->temp_directory, "proxy", NULL);
   escaped = g_dbus_address_escape_value (f->proxy_socket);
   f->proxy_address = g_strdup_printf ("unix:path=%s", escaped);
+
+  f->listen_fd = socket (AF_UNIX, SOCK_STREAM, 0);
+  g_assert_cmpint (f->listen_fd, >=, 0);
+
+  memset (&addr, 0, sizeof (addr));
+  addr.sun_family = AF_UNIX;
+  strncpy (addr.sun_path, f->proxy_socket, sizeof (addr.sun_path) - 1);
+
+  g_assert_cmpint (bind (f->listen_fd, (struct sockaddr *) &addr, sizeof (addr)), ==, 0);
+  g_assert_cmpint (listen (f->listen_fd, 1), ==, 0);
 }
 
 enum
@@ -123,7 +141,7 @@ enum
 
 static void
 test_basics (Fixture *f,
-             gconstpointer context G_GNUC_UNUSED)
+             gconstpointer context)
 {
   g_autoptr(GSubprocessLauncher) launcher = NULL;
   g_autoptr(GError) error = NULL;
@@ -135,6 +153,7 @@ test_basics (Fixture *f,
   ssize_t bytes_read;
   gsize i;
   gboolean found;
+  const TestParams *params = context;
 
   alarm (30);
 
@@ -146,11 +165,14 @@ test_basics (Fixture *f,
   g_subprocess_launcher_take_fd (launcher, sync_pipe[WRITE_END], 3);
   sync_pipe[WRITE_END] = -1;
 
+  if (params->use_fd_arg)
+    g_subprocess_launcher_take_fd (launcher, f->listen_fd, 4);
+
   f->proxy = g_subprocess_launcher_spawn (launcher, &error,
                                           f->proxy_path,
                                           "--fd=3",
                                           f->dbus_address,
-                                          f->proxy_socket,
+                                          params->use_fd_arg ? "fd:4" : f->proxy_socket,
                                           NULL);
   g_assert_no_error (error);
   g_assert_nonnull (f->proxy);
@@ -187,9 +209,9 @@ test_basics (Fixture *f,
       if (g_strcmp0 (strv[i], proxied_name) == 0)
         found = TRUE;
     }
-
   g_assert_true (found);
 }
+
 
 static void
 teardown (Fixture *f,
@@ -259,7 +281,11 @@ main (int argc,
 {
   g_test_init (&argc, &argv, NULL);
 
-  g_test_add ("/basics", Fixture, NULL, setup, test_basics, teardown);
+  static const TestParams test_without_fd = { .use_fd_arg = FALSE };
+  g_test_add ("/basics", Fixture, &test_without_fd, setup, test_basics, teardown);
+
+  static const TestParams test_with_fd = { .use_fd_arg = TRUE };
+  g_test_add ("/fd", Fixture, &test_with_fd, setup, test_basics, teardown);
 
   return g_test_run ();
 }
