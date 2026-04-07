@@ -39,7 +39,10 @@
  * address (typically the session bus) and forwards data between the
  * two. During the authentication phase all data is forwarded as
  * received, and additionally for the first 1 byte zero we also send
- * the proxy credentials to the bus.
+ * the proxy credentials to the bus. During accumulation of complete
+ * auth lines, any AUTH EXTERNAL commands from the client that include
+ * a UID have it replaced with the proxy's own hex-encoded UID so the
+ * bus can verify it against SCM_CREDENTIALS / SO_PEERCRED.
  *
  * Once the connection is authenticated there are two modes, filtered
  * and unfiltered. In the unfiltered mode we just send all messages on
@@ -308,6 +311,7 @@ struct FlatpakProxyClient
   FlatpakProxy *proxy;
 
   AuthState     auth_state;
+  gboolean      auth_external_pending;
   gsize         auth_requests;
   gsize         auth_replies;
   GByteArray   *auth_buffer;
@@ -2898,12 +2902,73 @@ find_auth_line_end (guint8 *line_start, gsize buffer_size)
                  AUTH_LINE_SENTINEL, strlen (AUTH_LINE_SENTINEL));
 }
 
+static gboolean
+auth_line_is_external (guint8 *line_start, guint8 *line_end, gboolean with_uid)
+{
+  static const char auth_ext[] = "AUTH EXTERNAL";
+  gsize line_len = line_end - line_start;
+
+  if (with_uid)
+    {
+      if (line_len <= strlen (auth_ext) + 1)
+        return FALSE;
+
+      return line_start[strlen (auth_ext)] == ' ' &&
+             memcmp (line_start, auth_ext, strlen (auth_ext)) == 0;
+    }
+  else
+    {
+      return line_len == strlen (auth_ext) &&
+             memcmp (line_start, auth_ext, strlen (auth_ext)) == 0;
+    }
+}
+
+static gboolean
+auth_line_is_data_with_content (guint8 *line_start, guint8 *line_end)
+{
+  static const char data_prefix[] = "DATA ";
+  gsize line_len = line_end - line_start;
+
+  if (line_len <= strlen (data_prefix))
+    return FALSE;
+
+  return memcmp (line_start, data_prefix, strlen (data_prefix)) == 0;
+}
+
+static char *
+build_hex_uid (void)
+{
+  g_autofree char *uid_str = g_strdup_printf ("%lu", (unsigned long) getuid ());
+  GString *hex = g_string_new (NULL);
+
+  for (gsize i = 0; uid_str[i] != '\0'; i++)
+    g_string_append_printf (hex, "%02x", (unsigned) (unsigned char) uid_str[i]);
+
+  return g_string_free (hex, FALSE);
+}
+
+static char *
+build_auth_external_line (void)
+{
+  g_autofree char *hex_uid = build_hex_uid ();
+  return g_strconcat ("AUTH EXTERNAL ", hex_uid, AUTH_LINE_SENTINEL, NULL);
+}
+
+static char *
+build_data_line (void)
+{
+  g_autofree char *hex_uid = build_hex_uid ();
+  return g_strconcat ("DATA ", hex_uid, AUTH_LINE_SENTINEL, NULL);
+}
+
 static gssize
-find_auth_end (FlatpakProxyClient *client, Buffer *buffer, gsize *out_lines_skipped)
+find_auth_end (FlatpakProxyClient *client, Buffer *buffer,
+               gsize *out_lines_skipped, GByteArray **out_forward_data)
 {
   goffset offset = 0;
   gsize original_size = client->auth_buffer->len;
   gsize lines_skipped = 0;
+  GByteArray *forward_data = g_byte_array_new ();
 
   /* Add the new data to the remaining data from last iteration */
   g_byte_array_append (client->auth_buffer, buffer->data, buffer->pos);
@@ -2917,15 +2982,56 @@ find_auth_end (FlatpakProxyClient *client, Buffer *buffer, gsize *out_lines_skip
       line_end = find_auth_line_end (line_start, remaining_data);
       if (line_end) /* Found end of line */
         {
-          offset = (line_end + strlen (AUTH_LINE_SENTINEL) - client->auth_buffer->data);
+          goffset next_offset = (line_end + strlen (AUTH_LINE_SENTINEL) -
+                                 client->auth_buffer->data);
 
           if (!auth_line_is_valid (line_start, line_end))
-            return FIND_AUTH_END_ABORT;
+            {
+              *out_forward_data = forward_data;
+              return FIND_AUTH_END_ABORT;
+            }
+
+          /* External auth with UID */
+          if (auth_line_is_external (line_start, line_end, TRUE))
+            {
+              g_autofree char *auth_line = build_auth_external_line ();
+              g_byte_array_append (forward_data,
+                                  (const guint8 *) auth_line,
+                                  strlen (auth_line));
+              client->auth_external_pending = FALSE;
+            }
+          /* External auth without UID */
+          else if (auth_line_is_external (line_start, line_end, FALSE))
+            {
+              g_byte_array_append (forward_data, line_start,
+                                  next_offset - offset);
+              client->auth_external_pending = TRUE;
+            }
+          /* DATA line with content (Client UID) */
+          else if (client->auth_external_pending &&
+                   auth_line_is_data_with_content (line_start, line_end))
+            {
+              g_autofree char *data_line = build_data_line ();
+              g_byte_array_append (forward_data,
+                                  (const guint8 *) data_line,
+                                  strlen (data_line));
+              client->auth_external_pending = FALSE;
+            }
+          /* Any unhandled line */
+          else
+            {
+              g_byte_array_append (forward_data, line_start,
+                                  next_offset - offset);
+              client->auth_external_pending = FALSE;
+            }
+
+          offset = next_offset;
 
           *line_end = 0;
           if (auth_line_is_begin (line_start))
             {
               *out_lines_skipped = lines_skipped;
+              *out_forward_data = forward_data;
               return offset - original_size;
             }
 
@@ -2936,6 +3042,7 @@ find_auth_end (FlatpakProxyClient *client, Buffer *buffer, gsize *out_lines_skip
         {
           /* No more end-of-line in this buffer */
           *out_lines_skipped = lines_skipped;
+          *out_forward_data = forward_data;
           g_byte_array_remove_range (client->auth_buffer, 0, offset);
 
           /* Abort if more than 16k before newline, similar to what dbus-daemon does */
@@ -2995,8 +3102,10 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
           /* Look for end of authentication mechanism */
           else if (side == &client->client_side && client->auth_state == AUTH_WAITING_FOR_BEGIN)
             {
+              g_autoptr(GByteArray) forward_data = NULL;
               gsize lines_skipped = 0;
-              gssize auth_end = find_auth_end (client, buffer, &lines_skipped);
+              gssize auth_end = find_auth_end (client, buffer, &lines_skipped,
+                                              &forward_data);
 
               client->auth_requests += lines_skipped;
 
@@ -3010,12 +3119,11 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                     new_auth_state = AUTH_WAITING_FOR_BACKLOG;
 
                   extra_data = buffer->pos - auth_end;
-                  buffer->size = buffer->pos = auth_end;
 
                   /* We may have gotten some extra data which is not part of
                      the auth handshake, keep it for the next iteration. */
                   if (extra_data > 0)
-                    side->extra_input_data = g_bytes_new (buffer->data + buffer->size, extra_data);
+                    side->extra_input_data = g_bytes_new (buffer->data + auth_end, extra_data);
                 }
               else if (auth_end == FIND_AUTH_END_ABORT)
                 {
@@ -3024,6 +3132,17 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                     g_print ("Invalid AUTH line, aborting\n");
                   side_closed (side);
                   break;
+                }
+              buffer_unref (buffer);
+              if (forward_data != NULL && forward_data->len > 0)
+                {
+                  buffer = buffer_new (forward_data->len, NULL);
+                  memcpy (buffer->data, forward_data->data, forward_data->len);
+                  buffer->pos = forward_data->len;
+                }
+              else
+                {
+                  buffer = NULL;
                 }
             }
           else if (side == &client->bus_side)
@@ -3075,7 +3194,8 @@ side_in_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
                 }
             }
 
-          got_buffer_from_side (side, buffer);
+          if (buffer)
+            got_buffer_from_side (side, buffer);
 
           client->auth_state = new_auth_state;
         }

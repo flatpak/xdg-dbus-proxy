@@ -48,9 +48,11 @@
   The proxy listens to the unix domain socket at <replaceable>PATH</replaceable>,
   and for each client that connects to the socket, it opens up a new connection to
   the specified D-Bus <replaceable>ADDRESS</replaceable> (typically the session bus)
-  and forwards data between the two. During the authentication phase all data is
-  forwarded as received, and additionally for the first 1 byte zero we also send
-  the proxy credentials to the bus.
+  and forwards data between the two. During the authentication phase, data is
+  forwarded with minor adjustments: the first 1 byte zero is accompanied by the
+  proxy's credentials, and any client-supplied UID in the
+  <literal>AUTH EXTERNAL</literal> exchange is replaced with the proxy's own so
+  the bus can verify it against the proxy's socket credentials.
 </para>
 <para>
   Once the connection is authenticated there are two modes, filtered and unfiltered.
