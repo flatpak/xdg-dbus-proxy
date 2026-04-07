@@ -1,3 +1,14 @@
+Changes in 0.1.7
+================
+
+Released 2025-04-07
+
+  * Drop the autotools build system
+  * Unbreak the CI
+  * Prevent a crash on disconnect
+  * Fix building with glibc >= 2.43
+  * Fix the eavesdrop filtering to prevent message interception
+
 Changes in 0.1.6
 ================
 
