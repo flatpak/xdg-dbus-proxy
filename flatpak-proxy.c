@@ -1994,6 +1994,8 @@ get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
   policy = flatpak_proxy_client_get_max_policy_and_matched (client, header->destination, &filters);
   if (policy < FLATPAK_POLICY_SEE)
     return HANDLE_HIDE;
+  if (header->type == G_DBUS_MESSAGE_TYPE_SIGNAL)
+    return HANDLE_PASS;
   if (policy < FLATPAK_POLICY_TALK)
     return HANDLE_DENY;
 
