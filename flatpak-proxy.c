@@ -123,9 +123,7 @@
  * Once authenticated we receive incoming messages one at a time,
  * and then we demarshal the message headers to make routing decisions.
  * This means we trust the bus to do message format validation, etc.
- * (because we don't parse the body). Also we assume that the bus verifies
- * reply_serials, i.e. that a reply can only be sent once and by the real
- * recipient of an previously sent method call.
+ * (because we don't parse the body).
  *
  * Serial numbers larger than MAX_CLIENT_SERIAL reserved for messages created by the
  * proxy itself (fake messages). This limits the possible values of serials
@@ -280,6 +278,61 @@ typedef struct
 static void header_free (Header *header);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (Header, header_free)
 
+/*
+ * A pending method call from @caller on the bus to the client,
+ * for which we expect a reply from the client back to @caller,
+ * represented as a single memory block.
+ */
+typedef struct
+{
+  guint32 serial;
+  char caller[];
+} ExpectedReplyFromClient;
+
+static ExpectedReplyFromClient *
+expected_reply_from_client_new (guint32 serial,
+                                const char *caller)
+{
+  ExpectedReplyFromClient *ret;
+  size_t len;
+
+  /* A missing destination on the method call means a method call from
+   * the message bus itself (unlikely, but possible).
+   * We represent this as the empty string (which is not a valid bus name)
+   * to avoid needing a separate representation for NULL. */
+  if (caller == NULL)
+    caller = "";
+
+  len = strlen (caller) + 1;
+
+  ret = g_malloc0 (sizeof (*ret) + len);
+  ret->serial = serial;
+  memcpy (&ret->caller, caller, len);
+  return ret;
+}
+
+/* Because it's a single memory block, we can just g_free() it. */
+#define expected_reply_from_client_free g_free
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (ExpectedReplyFromClient, expected_reply_from_client_free)
+
+static gboolean
+expected_reply_from_client_equal (const void *v1,
+                                  const void *v2)
+{
+  const ExpectedReplyFromClient *left = v1;
+  const ExpectedReplyFromClient *right = v2;
+
+  return left->serial == right->serial && g_str_equal (&left->caller, &right->caller);
+}
+
+static guint
+expected_reply_from_client_hash (const void *v)
+{
+  const ExpectedReplyFromClient *self = v;
+
+  return self->serial ^ g_str_hash (&self->caller);
+}
+
 typedef struct
 {
   gboolean            got_first_byte; /* always true on bus side */
@@ -296,8 +349,6 @@ typedef struct
 
   GList              *buffers; /* to be sent */
   GList              *control_messages;
-
-  GHashTable         *expected_replies;
 } ProxySide;
 
 struct FlatpakProxyClient
@@ -313,6 +364,31 @@ struct FlatpakProxyClient
 
   ProxySide     client_side;
   ProxySide     bus_side;
+
+  /* (element-type ExpectedReplyFromClient ExpectedReplyType)
+   * Map from message serial number and caller to expected replies.
+   * If this map contains
+   * { { serial, caller }: EXPECTED_REPLY_FOO },
+   * then it means that @caller on the bus sent a method call to the
+   * sandboxed client with SERIAL=serial.
+   * This means that in future we're expecting the sandboxed client to
+   * respond with a message back to @caller with REPLY_SERIAL=serial. */
+  GHashTable   *expected_replies_from_client;
+
+  /* (element-type guint ExpectedReplyType)
+   * Map from message serial number to expected reply type.
+   * If this map contains
+   * { serial: EXPECTED_REPLY_FOO },
+   * then it means that the sandboxed client sent a method call to the
+   * bus with SERIAL=serial.
+   * This means that in future we're expecting something on the bus to
+   * respond with a message that has REPLY_SERIAL=serial.
+   * This direction is simpler than the other way round because we don't
+   * need to distinguish between destinations: we trust the bus,
+   * and there is only one possible destination on the sandboxed client
+   * side anyway.
+   */
+  GHashTable   *expected_replies_from_bus;
 
   /* Filtering data: */
   guint32     hello_serial;
@@ -415,8 +491,6 @@ free_side (ProxySide *side)
     g_source_destroy (side->in_source);
   if (side->out_source)
     g_source_destroy (side->out_source);
-
-  g_hash_table_destroy (side->expected_replies);
 }
 
 static void
@@ -432,6 +506,8 @@ flatpak_proxy_client_finalize (GObject *object)
   g_hash_table_destroy (client->get_owner_reply);
   g_hash_table_destroy (client->unique_id_policy);
   g_hash_table_destroy (client->unique_id_owned_names);
+  g_hash_table_destroy (client->expected_replies_from_bus);
+  g_hash_table_destroy (client->expected_replies_from_client);
 
   free_side (&client->client_side);
   free_side (&client->bus_side);
@@ -455,7 +531,6 @@ init_side (FlatpakProxyClient *client, ProxySide *side)
   side->header_buffer.size = 16;
   side->header_buffer.pos = 0;
   side->current_read_buffer = &side->header_buffer;
-  side->expected_replies = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
 static void
@@ -470,6 +545,11 @@ flatpak_proxy_client_init (FlatpakProxyClient *client)
   client->get_owner_reply = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, g_free);
   client->unique_id_policy = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   client->unique_id_owned_names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) string_list_free);
+  client->expected_replies_from_client = g_hash_table_new_full (expected_reply_from_client_hash,
+                                                                expected_reply_from_client_equal,
+                                                                expected_reply_from_client_free,
+                                                                NULL);
+  client->expected_replies_from_bus = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
 static FlatpakProxyClient *
@@ -1065,34 +1145,102 @@ side_out_cb (GSocket *socket, GIOCondition condition, gpointer user_data)
     }
 }
 
+/*
+ * A method call was received from the sandboxed client,
+ * with serial number @serial.
+ * We now expect a reply from the bus side, of type @type.
+ * We do not need to track the expected destination,
+ * because there is only one destination on the client side
+ * (and we don't know its name until we have delivered the Hello reply).
+ */
 static void
-queue_expected_reply (ProxySide *side, guint32 serial, ExpectedReplyType type)
+queue_expected_reply_from_bus (FlatpakProxyClient *client,
+                               guint32 serial,
+                               ExpectedReplyType type)
 {
-  g_hash_table_replace (side->expected_replies,
+  g_return_if_fail (serial != 0);
+  g_return_if_fail (type != EXPECTED_REPLY_NONE);
+
+  g_hash_table_replace (client->expected_replies_from_bus,
                         GUINT_TO_POINTER (serial),
                         GUINT_TO_POINTER (type));
 }
 
 /*
- * @side: Either the bus or the sandboxed client
+ * A method call was received from sender @caller on the bus,
+ * with serial number @serial.
+ * We now expect a reply from the sandboxed client of type @type.
+ */
+static void
+queue_expected_reply_from_client (FlatpakProxyClient *client,
+                                  guint32 serial,
+                                  const char *caller,
+                                  ExpectedReplyType type)
+{
+  g_return_if_fail (serial != 0);
+  g_return_if_fail (caller == NULL || caller[0] != '\0');
+  g_return_if_fail (type != EXPECTED_REPLY_NONE);
+
+  g_hash_table_replace (client->expected_replies_from_client,
+                        expected_reply_from_client_new (serial, caller),
+                        GUINT_TO_POINTER (type));
+}
+
+
+/*
+ * @client: The client
  * @serial: The reply_serial field of the reply
  *
  * Returns: The type of the matching reply, or %EXPECTED_REPLY_NONE
  *  if no match was found.
  */
 static ExpectedReplyType
-steal_expected_reply (ProxySide *side, guint32 serial)
+steal_expected_reply_from_bus (FlatpakProxyClient *client,
+                               guint32 serial)
 {
   ExpectedReplyType type;
 
-  type = GPOINTER_TO_UINT (g_hash_table_lookup (side->expected_replies,
+  g_return_val_if_fail (serial != 0, EXPECTED_REPLY_NONE);
+
+  type = GPOINTER_TO_UINT (g_hash_table_lookup (client->expected_replies_from_bus,
                                                 GUINT_TO_POINTER (serial)));
   if (type)
-    g_hash_table_remove (side->expected_replies,
+    g_hash_table_remove (client->expected_replies_from_bus,
                          GUINT_TO_POINTER (serial));
   return type;
 }
 
+/*
+ * @client: The client
+ * @serial: The reply_serial field of the reply
+ * @caller: Only match pending method calls that came from @caller
+ *  (and therefore the reply should be sent to @caller).
+ *
+ * Returns: The type of the matching reply, or %EXPECTED_REPLY_NONE
+ *  if no match was found.
+ */
+static ExpectedReplyType
+steal_expected_reply_from_client (FlatpakProxyClient *client,
+                                  guint32 serial,
+                                  const char *caller)
+{
+  g_autoptr(ExpectedReplyFromClient) key = NULL;
+  void *type;
+
+  g_return_val_if_fail (serial != 0, EXPECTED_REPLY_NONE);
+  g_return_val_if_fail (caller == NULL || caller[0] != '\0', EXPECTED_REPLY_NONE);
+
+  key = expected_reply_from_client_new (serial, caller);
+
+  if (g_hash_table_lookup_extended (client->expected_replies_from_client, key,
+                                    NULL, &type))
+    {
+      g_hash_table_remove (client->expected_replies_from_client, key);
+      return GPOINTER_TO_UINT (type);
+    }
+
+  return EXPECTED_REPLY_NONE;
+}
 
 static void
 queue_outgoing_buffer (ProxySide *side, Buffer *buffer)
@@ -2012,11 +2160,17 @@ get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
 
   g_autoptr(GList) filters = NULL;
 
+  /* If the message claims to be a reply to a method call with serial number n,
+   * we allow if and only if there is indeed a pending method call from
+   * the reply's destination, with serial number n, and it has not yet had
+   * its reply */
   if (is_reply (header))
     {
       ExpectedReplyType expected_reply =
-        steal_expected_reply (&client->bus_side,
-                              header->reply_serial);
+        steal_expected_reply_from_client (client,
+                                          header->reply_serial,
+                                          header->destination);
+
       if (expected_reply == EXPECTED_REPLY_NONE)
         return HANDLE_DENY;
 
@@ -2380,7 +2534,7 @@ queue_fake_message (FlatpakProxyClient *client, GDBusMessage *message, ExpectedR
   g_object_unref (message);
 
   queue_outgoing_buffer (&client->bus_side, buffer);
-  queue_expected_reply (&client->client_side, client->last_fake_serial, reply_type);
+  queue_expected_reply_from_bus (client, client->last_fake_serial, reply_type);
 }
 
 /* After the first Hello message we need to synthesize a bunch of messages to synchronize the
@@ -2670,7 +2824,7 @@ handle_deny:
         }
 
       if (buffer != NULL && expecting_reply != EXPECTED_REPLY_NONE)
-        queue_expected_reply (&client->client_side, header->serial, expecting_reply);
+        queue_expected_reply_from_bus (client, header->serial, expecting_reply);
     }
 
   if (buffer)
@@ -2717,8 +2871,14 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
 
       if (is_reply (header))
         {
-          expected_reply = steal_expected_reply (&client->client_side,
-                                                 header->reply_serial);
+          /* If the client previously made a method call out to the bus
+           * with serial number n, we allow one reply to come from
+           * the bus "in reply to: n" back to the client.
+           * We allow any destination - this is OK, because we trust
+           * the bus, and in any case there is only one valid destination
+           * on the client side (it's the sandboxed client). */
+          expected_reply = steal_expected_reply_from_bus (client,
+                                                          header->reply_serial);
 
           switch (expected_reply)
             {
@@ -2865,8 +3025,10 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
       if (buffer && header->sender && header->sender[0] == ':')
         flatpak_proxy_client_update_unique_id_policy (client, header->sender, FLATPAK_POLICY_SEE);
 
+      /* Remember that the sandboxed client is allowed to send a single
+       * reply back to header->sender, marked "in reply to" header->serial. */
       if (buffer && client_message_generates_reply (header))
-        queue_expected_reply (&client->bus_side, header->serial, EXPECTED_REPLY_NORMAL);
+        queue_expected_reply_from_client (client, header->serial, header->sender, EXPECTED_REPLY_NORMAL);
     }
 
   if (buffer)
