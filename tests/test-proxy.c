@@ -66,6 +66,7 @@
 
 #define MALICIOUS_IFACE "com.example.Malice"
 #define MALICIOUS_MEMBER "ShouldNotBeAllowed"
+#define MALICIOUS_BODY "Message containing this body should have been blocked"
 
 static void
 ready_cb (GObject *source_object,
@@ -206,11 +207,22 @@ conn_filter_cb (GDBusConnection *conn,
             break;
 
           case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
-            g_test_message ("%s got method reply", conn_info->label);
-            break;
-
           case G_DBUS_MESSAGE_TYPE_ERROR:
-            g_test_message ("%s got error reply", conn_info->label);
+            if (type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN)
+              g_test_message ("%s got method reply", conn_info->label);
+            else
+              g_test_message ("%s got error reply", conn_info->label);
+
+            if (g_str_equal (g_dbus_message_get_signature (message), "s"))
+              {
+                const char *s = NULL;
+
+                g_variant_get (g_dbus_message_get_body (message), "(&s)", &s);
+
+                if (g_str_equal (s, MALICIOUS_BODY))
+                  g_error ("Forged reply received");
+              }
+
             break;
 
           case G_DBUS_MESSAGE_TYPE_INVALID:
@@ -893,6 +905,7 @@ typedef struct
   const char *label;
   GDBusMessageType type;
   unsigned broadcast : 1;
+  unsigned misdirected : 1;
 } ReplyTest;
 
 static const ReplyTest reply_tests[] =
@@ -901,12 +914,20 @@ static const ReplyTest reply_tests[] =
       G_DBUS_MESSAGE_TYPE_SIGNAL },
     { "should not be able to send a broadcast signal in reply",
       G_DBUS_MESSAGE_TYPE_SIGNAL, .broadcast = TRUE },
+    { "should not be able to send a unicast signal to someone else in reply",
+      G_DBUS_MESSAGE_TYPE_SIGNAL, .misdirected = TRUE },
     { "should not be able to send a method call in reply",
       G_DBUS_MESSAGE_TYPE_METHOD_CALL },
+    { "should not be able to send a method call to someone else in reply",
+      G_DBUS_MESSAGE_TYPE_METHOD_CALL, .misdirected = TRUE },
     { "should be able to send a method return in reply",
       G_DBUS_MESSAGE_TYPE_METHOD_RETURN },
+    { "should not be able to send a method return to someone else in reply",
+      G_DBUS_MESSAGE_TYPE_METHOD_RETURN, .misdirected = TRUE },
     { "should be able to send an error in reply",
       G_DBUS_MESSAGE_TYPE_ERROR },
+    { "should not be able to send an error to someone else in reply",
+      G_DBUS_MESSAGE_TYPE_ERROR, .misdirected = TRUE },
 };
 
 static void
@@ -930,11 +951,19 @@ test_reply (Fixture *f,
       int caller_calls_before;
       int caller_broadcast_before;
       int caller_unicast_before;
+      int other_calls_before;
+      int other_broadcast_before;
+      int other_unicast_before;
+
       g_test_message ("#%zu: %s", i, t->label);
 
       caller_calls_before = g_atomic_int_get (&f->caller_conn.n_method_calls);
       caller_unicast_before = g_atomic_int_get (&f->caller_conn.n_unicast_signals);
       caller_broadcast_before = g_atomic_int_get (&f->caller_conn.n_broadcasts);
+
+      other_calls_before = g_atomic_int_get (&f->cannot_access_conn.n_method_calls);
+      other_unicast_before = g_atomic_int_get (&f->cannot_access_conn.n_unicast_signals);
+      other_broadcast_before = g_atomic_int_get (&f->cannot_access_conn.n_broadcasts);
 
       call = g_dbus_message_new_method_call (f->proxied.unique_name,
                                              "/",
@@ -966,6 +995,11 @@ test_reply (Fixture *f,
               {
                 g_test_message ("Sending malicious broadcast signal as a reply");
               }
+            else if (t->misdirected)
+              {
+                g_test_message ("Sending malicious unicast signal reply to wrong destination");
+                g_dbus_message_set_destination (reply, f->cannot_access_conn.unique_name);
+              }
             else
               {
                 g_test_message ("Sending malicious unicast signal as a reply");
@@ -975,23 +1009,56 @@ test_reply (Fixture *f,
             break;
 
           case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
-            g_test_message ("Sending malicious method call as a reply");
-            reply = g_dbus_message_new_method_call (f->caller_conn.unique_name,
-                                                    "/",
-                                                    MALICIOUS_IFACE,
-                                                    MALICIOUS_MEMBER);
+            if (t->misdirected)
+              {
+                g_test_message ("Sending malicious method call to wrong destination");
+                reply = g_dbus_message_new_method_call (f->cannot_access_conn.unique_name,
+                                                        "/",
+                                                        MALICIOUS_IFACE,
+                                                        MALICIOUS_MEMBER);
+              }
+            else
+              {
+                g_test_message ("Sending malicious method call as a reply");
+                reply = g_dbus_message_new_method_call (f->caller_conn.unique_name,
+                                                        "/",
+                                                        MALICIOUS_IFACE,
+                                                        MALICIOUS_MEMBER);
+              }
             break;
 
           case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
-            g_test_message ("Sending legitimate reply as a reply");
             reply = g_dbus_message_new_method_reply (call);
+
+            if (t->misdirected)
+              {
+                g_test_message ("Sending malicious reply to wrong destination");
+                g_dbus_message_set_destination (reply, f->cannot_access_conn.unique_name);
+                g_dbus_message_set_body (reply, g_variant_new ("(s)", MALICIOUS_BODY));
+              }
+            else
+              {
+                g_test_message ("Sending legitimate reply as a reply");
+              }
+
             break;
 
           case G_DBUS_MESSAGE_TYPE_ERROR:
-            g_test_message ("Sending legitimate error as a reply");
             reply = g_dbus_message_new_method_error (call,
                                                      "com.example.No",
                                                      "That didn't work");
+
+            if (t->misdirected)
+              {
+                g_test_message ("Sending malicious error to wrong destination");
+                g_dbus_message_set_destination (reply, f->cannot_access_conn.unique_name);
+                g_dbus_message_set_body (reply, g_variant_new ("(s)", MALICIOUS_BODY));
+              }
+            else
+              {
+                g_test_message ("Sending legitimate error as a reply");
+              }
+
             break;
 
           case G_DBUS_MESSAGE_TYPE_INVALID:
@@ -1016,6 +1083,14 @@ test_reply (Fixture *f,
                        caller_unicast_before);
       g_assert_cmpint (g_atomic_int_get (&f->caller_conn.n_broadcasts), ==,
                        caller_broadcast_before);
+
+      /* The other connection didn't receive any messages at all */
+      g_assert_cmpint (g_atomic_int_get (&f->cannot_access_conn.n_method_calls), ==,
+                       other_calls_before);
+      g_assert_cmpint (g_atomic_int_get (&f->cannot_access_conn.n_unicast_signals), ==,
+                       other_unicast_before);
+      g_assert_cmpint (g_atomic_int_get (&f->cannot_access_conn.n_broadcasts), ==,
+                       other_broadcast_before);
     }
 }
 
