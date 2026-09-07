@@ -252,7 +252,6 @@ typedef struct
   const char *destination;
   const char *sender;
   const char *signature;
-  gboolean    has_reply_serial;
   guint32     reply_serial;
   guint32     unix_fds;
 } Header;
@@ -1221,6 +1220,22 @@ header_debug_str (GString *s, Header *header)
   return s->str;
 }
 
+static gboolean
+is_reply (Header *header)
+{
+  switch (header->type)
+    {
+    case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
+    case G_DBUS_MESSAGE_TYPE_ERROR:
+      return TRUE;
+
+    case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
+    case G_DBUS_MESSAGE_TYPE_SIGNAL:
+    default:
+      return FALSE;
+    }
+}
+
 static Header *
 parse_header (Buffer *buffer, GError **error)
 {
@@ -1228,6 +1243,7 @@ parse_header (Buffer *buffer, GError **error)
   guint32 offset, end_offset;
   guint8 header_type;
   const char *signature;
+  gboolean has_reply_serial = FALSE;
   g_autoptr(GError) str_error = NULL;
   g_autoptr(GString) header_str = NULL;
 
@@ -1452,7 +1468,7 @@ parse_header (Buffer *buffer, GError **error)
               return NULL;
             }
 
-          header->has_reply_serial = TRUE;
+          has_reply_serial = TRUE;
           header->reply_serial = read_uint32 (header, &buffer->data[offset]);
           offset += 4;
           break;
@@ -1570,7 +1586,7 @@ parse_header (Buffer *buffer, GError **error)
       break;
 
     case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
-      if (!header->has_reply_serial)
+      if (!has_reply_serial)
         {
           g_set_error (error,
                        G_IO_ERROR,
@@ -1582,7 +1598,7 @@ parse_header (Buffer *buffer, GError **error)
       break;
 
     case G_DBUS_MESSAGE_TYPE_ERROR:
-      if (header->error_name  == NULL || !header->has_reply_serial)
+      if (header->error_name  == NULL || !has_reply_serial)
         {
           g_set_error (error,
                        G_IO_ERROR,
@@ -1627,6 +1643,12 @@ parse_header (Buffer *buffer, GError **error)
                    header_debug_str (header_str, header));
       return NULL;
     }
+
+  /* Invariant: every reply has a reply serial.
+   * (Note that the converse is not true: it is technically possible to
+   * send a method call or signal that claims to be a reply.) */
+  if (is_reply (header))
+    g_assert (has_reply_serial);
 
   return g_steal_pointer (&header);
 }
@@ -1980,7 +2002,7 @@ get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
 
   g_autoptr(GList) filters = NULL;
 
-  if (header->has_reply_serial)
+  if (is_reply (header))
     {
       ExpectedReplyType expected_reply =
         steal_expected_reply (&client->bus_side,
@@ -2672,7 +2694,7 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
       if (client->proxy->log_messages)
         print_incoming_header (header);
 
-      if (header->has_reply_serial)
+      if (is_reply (header))
         {
           expected_reply = steal_expected_reply (get_other_side (side), header->reply_serial);
 
@@ -2781,15 +2803,8 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
         }
       else /* Not reply */
         {
-
-          /* Don't allow reply types with no reply_serial */
-          if (header->type == G_DBUS_MESSAGE_TYPE_METHOD_RETURN ||
-              header->type == G_DBUS_MESSAGE_TYPE_ERROR)
-            {
-              if (client->proxy->log_messages)
-                g_print ("*Invalid reply*\n");
-              g_clear_pointer (&buffer, buffer_unref);
-            }
+          g_assert (header->type != G_DBUS_MESSAGE_TYPE_METHOD_RETURN);
+          g_assert (header->type != G_DBUS_MESSAGE_TYPE_ERROR);
 
           /* We filter all NameOwnerChanged signal according to the policy */
           if (message_is_name_owner_changed (client, header))
