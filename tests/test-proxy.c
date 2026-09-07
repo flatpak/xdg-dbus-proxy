@@ -40,6 +40,7 @@
 #define DBUS_REQUEST_NAME_REPLY_EXISTS 3
 #define DBUS_REQUEST_NAME_REPLY_ALREADY_OWNER 4
 
+#define CALLER_NAME "com.example.Caller"
 #define CANNOT_ACCESS_NAME "com.example.CannotAccess"
 #define CAN_SEE_NAME "com.example.CanSee"
 #define CAN_TALK_NAME "com.example.CanTalk"
@@ -59,6 +60,9 @@
 #define CAN_RECEIVE_SOME_IFACE "org.example.CanReceiveThis"
 #define CAN_RECEIVE_SOME_SIGNAL "JustThisSignal"
 #define CAN_RECEIVE_SOME_PATH "/just/this/path"
+
+#define IGNORE_IFACE "com.example.Ignore"
+#define IGNORE_METHOD "Ignore"
 
 static void
 ready_cb (GObject *source_object,
@@ -109,6 +113,7 @@ connection_clear (Connection *self)
 typedef struct
 {
   Connection proxied;
+  Connection caller_conn;
   Connection cannot_access_conn;
   Connection can_see_conn;
   Connection can_talk_conn;
@@ -167,6 +172,16 @@ conn_filter_cb (GDBusConnection *conn,
           case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
             g_test_message ("%s got method call", conn_info->label);
             g_atomic_int_inc (&conn_info->n_method_calls);
+
+            if (g_strcmp0 (iface, IGNORE_IFACE) == 0 &&
+                g_strcmp0 (member, IGNORE_METHOD) == 0)
+              {
+                g_test_message ("method call is %s.%s, ignoring",
+                                iface, member);
+                g_clear_object (&message);
+                return NULL;
+              }
+
             break;
 
           case G_DBUS_MESSAGE_TYPE_SIGNAL:
@@ -269,6 +284,51 @@ fixture_connect (Fixture *f,
 }
 
 static void
+do_round_trip (const Connection *caller,
+               const Connection *destination)
+{
+  g_autoptr(GAsyncResult) result = NULL;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GVariant) tuple = NULL;
+
+  g_dbus_connection_call (caller->conn,
+                          destination->unique_name,
+                          "/",
+                          EXAMPLE_IFACE,
+                          EXAMPLE_METHOD,
+                          NULL,
+                          G_VARIANT_TYPE ("()"),
+                          G_DBUS_CALL_FLAGS_NONE,
+                          -1,     /* timeout */
+                          NULL,   /* cancellable */
+                          ready_cb,
+                          &result);
+
+  while (result == NULL)
+    g_main_context_iteration (NULL, TRUE);
+
+  tuple = g_dbus_connection_call_finish (caller->conn, result, &error);
+
+  /* For simplicity we didn't actually implement any method calls,
+   * so the result should be an error. */
+  g_assert_nonnull (error);
+  g_assert_null (tuple);
+  g_assert_cmpstr (g_quark_to_string (error->domain), ==, g_quark_to_string (G_DBUS_ERROR));
+
+  switch (error->code)
+    {
+      case G_DBUS_ERROR_UNKNOWN_METHOD:
+      case G_DBUS_ERROR_UNKNOWN_INTERFACE:
+      case G_DBUS_ERROR_UNKNOWN_OBJECT:
+        /* OK */
+        break;
+
+      default:
+        g_assert_not_reached ();
+    }
+}
+
+static void
 setup (Fixture *f,
        gconstpointer context G_GNUC_UNUSED)
 {
@@ -346,6 +406,7 @@ setup (Fixture *f,
                                                   g_free,
                                                   NULL);
 
+  fixture_connect (f, &f->caller_conn, CALLER_NAME);
   fixture_connect (f, &f->cannot_access_conn, CANNOT_ACCESS_NAME);
   fixture_connect (f, &f->can_see_conn, CAN_SEE_NAME);
   fixture_connect (f, &f->can_talk_conn, CAN_TALK_NAME);
@@ -824,6 +885,89 @@ test_receive (Fixture *f,
     }
 }
 
+typedef struct
+{
+  const char *label;
+  GDBusMessageType type;
+  unsigned broadcast : 1;
+} ReplyTest;
+
+static const ReplyTest reply_tests[] =
+{
+    { "should be able to send a method return in reply",
+      G_DBUS_MESSAGE_TYPE_METHOD_RETURN },
+    { "should be able to send an error in reply",
+      G_DBUS_MESSAGE_TYPE_ERROR },
+};
+
+static void
+test_reply (Fixture *f,
+            gconstpointer context G_GNUC_UNUSED)
+{
+  alarm (30);
+  fixture_start_proxy (f);
+
+  for (size_t i = 0; i < G_N_ELEMENTS (reply_tests); i++)
+    {
+      const ReplyTest *t = &reply_tests[i];
+      g_autoptr(GDBusMessage) call = NULL;
+      g_autoptr(GDBusMessage) reply = NULL;
+      g_autoptr(GError) error = NULL;
+      guint32 call_serial = 0;
+      g_test_message ("#%zu: %s", i, t->label);
+
+      call = g_dbus_message_new_method_call (f->proxied.unique_name,
+                                             "/",
+                                             IGNORE_IFACE,
+                                             IGNORE_METHOD);
+      g_dbus_connection_send_message (f->caller_conn.conn,
+                                      call,
+                                      G_DBUS_SEND_MESSAGE_FLAGS_NONE,
+                                      &call_serial,
+                                      &error);
+      g_assert_no_error (error);
+      g_assert_cmpuint (call_serial, !=, 0);
+      g_test_message ("Method call was serial number %u", call_serial);
+
+      /* Do a round-trip from the caller to the sandboxed connection and back.
+       * D-Bus messages are delivered sequentially, so by the time this call
+       * has finished, the method call will also have passed through the
+       * xdg-dbus-proxy and the dbus-daemon. */
+      do_round_trip (&f->caller_conn, &f->proxied);
+
+      switch (t->type)
+        {
+          case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
+            g_test_message ("Sending legitimate reply as a reply");
+            reply = g_dbus_message_new_method_reply (call);
+            break;
+
+          case G_DBUS_MESSAGE_TYPE_ERROR:
+            g_test_message ("Sending legitimate error as a reply");
+            reply = g_dbus_message_new_method_error (call,
+                                                     "com.example.No",
+                                                     "That didn't work");
+            break;
+
+          case G_DBUS_MESSAGE_TYPE_SIGNAL:
+          case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
+          case G_DBUS_MESSAGE_TYPE_INVALID:
+          default:
+            g_assert_not_reached ();
+        }
+
+      g_dbus_message_set_reply_serial (reply, call_serial);
+      g_dbus_connection_send_message (f->proxied.conn, reply,
+                                      G_DBUS_SEND_MESSAGE_FLAGS_NONE,
+                                      NULL,   /* serial */
+                                      &error);
+      g_assert_no_error (error);
+
+      /* Do another round-trip, to make sure everything has been delivered */
+      do_round_trip (&f->caller_conn, &f->proxied);
+    }
+}
+
 static void
 teardown (Fixture *f,
           gconstpointer context G_GNUC_UNUSED)
@@ -895,6 +1039,7 @@ main (int argc,
   g_test_add ("/call", Fixture, NULL, setup, test_call, teardown);
   g_test_add ("/own", Fixture, NULL, setup, test_own, teardown);
   g_test_add ("/receive", Fixture, NULL, setup, test_receive, teardown);
+  g_test_add ("/reply", Fixture, NULL, setup, test_reply, teardown);
 
   return g_test_run ();
 }
