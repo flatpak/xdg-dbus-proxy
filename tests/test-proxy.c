@@ -64,6 +64,9 @@
 #define IGNORE_IFACE "com.example.Ignore"
 #define IGNORE_METHOD "Ignore"
 
+#define MALICIOUS_IFACE "com.example.Malice"
+#define MALICIOUS_MEMBER "ShouldNotBeAllowed"
+
 static void
 ready_cb (GObject *source_object,
           GAsyncResult *result,
@@ -894,6 +897,12 @@ typedef struct
 
 static const ReplyTest reply_tests[] =
 {
+    { "should not be able to send a unicast signal in reply",
+      G_DBUS_MESSAGE_TYPE_SIGNAL },
+    { "should not be able to send a broadcast signal in reply",
+      G_DBUS_MESSAGE_TYPE_SIGNAL, .broadcast = TRUE },
+    { "should not be able to send a method call in reply",
+      G_DBUS_MESSAGE_TYPE_METHOD_CALL },
     { "should be able to send a method return in reply",
       G_DBUS_MESSAGE_TYPE_METHOD_RETURN },
     { "should be able to send an error in reply",
@@ -907,6 +916,10 @@ test_reply (Fixture *f,
   alarm (30);
   fixture_start_proxy (f);
 
+  /* If a process outside the sandbox calls a method on the
+   * sandboxed process, then the sandboxed process is allowed to reply,
+   * but is not allowed to fake a "reply" that is really a method call
+   * or signal. (GHSA-2cgv-pwcq-wvpq) */
   for (size_t i = 0; i < G_N_ELEMENTS (reply_tests); i++)
     {
       const ReplyTest *t = &reply_tests[i];
@@ -914,7 +927,14 @@ test_reply (Fixture *f,
       g_autoptr(GDBusMessage) reply = NULL;
       g_autoptr(GError) error = NULL;
       guint32 call_serial = 0;
+      int caller_calls_before;
+      int caller_broadcast_before;
+      int caller_unicast_before;
       g_test_message ("#%zu: %s", i, t->label);
+
+      caller_calls_before = g_atomic_int_get (&f->caller_conn.n_method_calls);
+      caller_unicast_before = g_atomic_int_get (&f->caller_conn.n_unicast_signals);
+      caller_broadcast_before = g_atomic_int_get (&f->caller_conn.n_broadcasts);
 
       call = g_dbus_message_new_method_call (f->proxied.unique_name,
                                              "/",
@@ -937,6 +957,31 @@ test_reply (Fixture *f,
 
       switch (t->type)
         {
+          case G_DBUS_MESSAGE_TYPE_SIGNAL:
+            reply = g_dbus_message_new_signal ("/",
+                                               MALICIOUS_IFACE,
+                                               MALICIOUS_MEMBER);
+
+            if (t->broadcast)
+              {
+                g_test_message ("Sending malicious broadcast signal as a reply");
+              }
+            else
+              {
+                g_test_message ("Sending malicious unicast signal as a reply");
+                g_dbus_message_set_destination (reply, f->caller_conn.unique_name);
+              }
+
+            break;
+
+          case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
+            g_test_message ("Sending malicious method call as a reply");
+            reply = g_dbus_message_new_method_call (f->caller_conn.unique_name,
+                                                    "/",
+                                                    MALICIOUS_IFACE,
+                                                    MALICIOUS_MEMBER);
+            break;
+
           case G_DBUS_MESSAGE_TYPE_METHOD_RETURN:
             g_test_message ("Sending legitimate reply as a reply");
             reply = g_dbus_message_new_method_reply (call);
@@ -949,8 +994,6 @@ test_reply (Fixture *f,
                                                      "That didn't work");
             break;
 
-          case G_DBUS_MESSAGE_TYPE_SIGNAL:
-          case G_DBUS_MESSAGE_TYPE_METHOD_CALL:
           case G_DBUS_MESSAGE_TYPE_INVALID:
           default:
             g_assert_not_reached ();
@@ -965,6 +1008,14 @@ test_reply (Fixture *f,
 
       /* Do another round-trip, to make sure everything has been delivered */
       do_round_trip (&f->caller_conn, &f->proxied);
+
+      /* The caller didn't receive any extraneous messages */
+      g_assert_cmpint (g_atomic_int_get (&f->caller_conn.n_method_calls), ==,
+                       caller_calls_before);
+      g_assert_cmpint (g_atomic_int_get (&f->caller_conn.n_unicast_signals), ==,
+                       caller_unicast_before);
+      g_assert_cmpint (g_atomic_int_get (&f->caller_conn.n_broadcasts), ==,
+                       caller_broadcast_before);
     }
 }
 
