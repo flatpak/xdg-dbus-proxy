@@ -1073,6 +1073,13 @@ queue_expected_reply (ProxySide *side, guint32 serial, ExpectedReplyType type)
                         GUINT_TO_POINTER (type));
 }
 
+/*
+ * @side: Either the bus or the sandboxed client
+ * @serial: The reply_serial field of the reply
+ *
+ * Returns: The type of the matching reply, or %EXPECTED_REPLY_NONE
+ *  if no match was found.
+ */
 static ExpectedReplyType
 steal_expected_reply (ProxySide *side, guint32 serial)
 {
@@ -1994,6 +2001,9 @@ is_introspection_call (Header *header)
     g_strcmp0 (header->interface, "org.freedesktop.DBus.Introspectable") == 0;
 }
 
+/*
+ * @header: an outgoing message from the sandboxed client to the bus
+ */
 static BusHandler
 get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
 {
@@ -2495,11 +2505,16 @@ queue_wildcard_initial_name_ops (FlatpakProxyClient *client, Header *header, Buf
     }
 }
 
-
+/*
+ * Called when we received @buffer from the client side of @client:
+ * it's an outgoing message from the sandboxed client to the bus.
+ */
 static void
 got_buffer_from_client (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer)
 {
   ExpectedReplyType expecting_reply = EXPECTED_REPLY_NONE;
+
+  g_assert (side == &client->client_side);
 
   if (client->auth_state == AUTH_COMPLETE && client->proxy->filter)
     {
@@ -2514,18 +2529,18 @@ got_buffer_from_client (FlatpakProxyClient *client, ProxySide *side, Buffer *buf
         {
           g_warning ("Invalid message header format from client: %s",
                      error->message);
-          side_closed (side);
+          side_closed (&client->client_side);
           buffer_unref (buffer);
           return;
         }
 
-      if (!update_socket_messages (side, buffer, header))
+      if (!update_socket_messages (&client->client_side, buffer, header))
         return;
 
       if (header->serial > MAX_CLIENT_SERIAL)
         {
           g_warning ("Invalid client serial: Exceeds maximum value of %u", MAX_CLIENT_SERIAL);
-          side_closed (side);
+          side_closed (&client->client_side);
           buffer_unref (buffer);
           return;
         }
@@ -2655,7 +2670,7 @@ handle_deny:
         }
 
       if (buffer != NULL && expecting_reply != EXPECTED_REPLY_NONE)
-        queue_expected_reply (side, header->serial, expecting_reply);
+        queue_expected_reply (&client->client_side, header->serial, expecting_reply);
     }
 
   if (buffer)
@@ -2665,9 +2680,15 @@ handle_deny:
     queue_initial_name_ops (client);
 }
 
+/*
+ * Called when we received @buffer from the bus side of @client:
+ * it's an incoming message from the bus to the sandboxed client.
+ */
 static void
 got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer)
 {
+  g_assert (side == &client->bus_side);
+
   if (client->auth_state == AUTH_COMPLETE && client->proxy->filter)
     {
       g_autoptr(Header) header = NULL;
@@ -2684,11 +2705,11 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
           g_warning ("Invalid message header format from bus: %s",
                      error->message);
           buffer_unref (buffer);
-          side_closed (side);
+          side_closed (&client->bus_side);
           return;
         }
 
-      if (!update_socket_messages (side, buffer, header))
+      if (!update_socket_messages (&client->bus_side, buffer, header))
         return;
 
       if (client->proxy->log_messages)
@@ -2696,7 +2717,8 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
 
       if (is_reply (header))
         {
-          expected_reply = steal_expected_reply (get_other_side (side), header->reply_serial);
+          expected_reply = steal_expected_reply (&client->client_side,
+                                                 header->reply_serial);
 
           switch (expected_reply)
             {
@@ -2844,7 +2866,7 @@ got_buffer_from_bus (FlatpakProxyClient *client, ProxySide *side, Buffer *buffer
         flatpak_proxy_client_update_unique_id_policy (client, header->sender, FLATPAK_POLICY_SEE);
 
       if (buffer && client_message_generates_reply (header))
-        queue_expected_reply (side, header->serial, EXPECTED_REPLY_NORMAL);
+        queue_expected_reply (&client->bus_side, header->serial, EXPECTED_REPLY_NORMAL);
     }
 
   if (buffer)
