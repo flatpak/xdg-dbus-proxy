@@ -1,3 +1,15 @@
+Changes in 0.1.9
+================
+
+Released: not yet
+
+  * Fix message filtering bypass vulnerabilities
+    (CVE-2026-94422, GHSA-2cgv-pwcq-wvpq)
+      - Don't allow method calls and signals to be treated as requested
+        replies, even if they specify a reply serial number
+      - Only allow replies that were sent to the appropriate destination
+  * Improve automated tests to include attempts to exploit CVE-2026-94422
+
 Changes in 0.1.8
 ================
 
