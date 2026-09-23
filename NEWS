@@ -1,7 +1,7 @@
 Changes in 0.1.9
 ================
 
-Released: not yet
+Released: 2026-09-23
 
   * Fix message filtering bypass vulnerabilities
     (CVE-2026-94422, GHSA-2cgv-pwcq-wvpq)
