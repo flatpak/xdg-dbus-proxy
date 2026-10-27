@@ -2156,6 +2156,7 @@ static BusHandler
 get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
 {
   FlatpakPolicy policy;
+  FlatpakPolicy policy_sender;
   const char *method;
 
   g_autoptr(GList) filters = NULL;
@@ -2177,7 +2178,12 @@ get_dbus_method_handler (FlatpakProxyClient *client, Header *header)
       return HANDLE_PASS;
     }
 
-  policy = flatpak_proxy_client_get_max_policy_and_matched (client, header->destination, &filters);
+  /* check policy in both directions and choose less restrictive one */
+  policy_sender = flatpak_proxy_client_get_max_policy_and_matched (client, header->sender,      &filters);
+  policy        = flatpak_proxy_client_get_max_policy_and_matched (client, header->destination, &filters);
+  if (policy_sender > policy)
+    policy = policy_sender;
+
   if (policy < FLATPAK_POLICY_SEE)
     return HANDLE_HIDE;
   if (policy < FLATPAK_POLICY_TALK)
